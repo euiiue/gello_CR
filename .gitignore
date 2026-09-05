@@ -23,3 +23,6 @@
 
 # Downloaded/archive copies; keep source files instead.
 *.zip
+
+# Project-local virtual environment.
+.venv/
