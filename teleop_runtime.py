@@ -29,6 +29,7 @@ import numpy as np
 # is still launched from the repository root, while new code uses a src layout.
 try:
     from gello_cr.devices.gello import GelloConfig, GelloDevice
+    from gello_cr.devices.o6 import O6Config, O6Device
 except ModuleNotFoundError as exc:
     if exc.name != "gello_cr":
         raise
@@ -36,6 +37,7 @@ except ModuleNotFoundError as exc:
     if str(_V2_SRC_DIR) not in sys.path:
         sys.path.insert(0, str(_V2_SRC_DIR))
     from gello_cr.devices.gello import GelloConfig, GelloDevice
+    from gello_cr.devices.o6 import O6Config, O6Device
 
 
 
@@ -1345,17 +1347,6 @@ class GelloKinematics:
         return self.pose(joints_rad)[:3, 3].copy()
 
 
-@dataclass
-class _O6RecoveryRequest:
-    motor_index: int
-    speed: int
-    torque: int
-    done: threading.Event
-    cancelled: threading.Event
-    result: Optional[dict[str, Any]] = None
-    error: str = ""
-
-
 @dataclass(frozen=True)
 class NrcServoTransition:
     initial_state: int
@@ -1610,7 +1601,7 @@ class RoArmSerialController:
 
 
 class O6Controller:
-    """Single-owner background thread for the blocking O6 Modbus SDK."""
+    """Legacy-compatible facade over the V2 O6Device."""
 
     def __init__(
         self,
@@ -1619,103 +1610,64 @@ class O6Controller:
         hand_id: int = 0x27,
         baudrate: int = 115200,
     ):
-        self.port = port
+        self.port = str(port)
         self.sdk_root = str(sdk_root)
         self.hand_id = int(hand_id)
         self.baudrate = int(baudrate)
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-        self._ready = threading.Event()
-        self._lock = threading.RLock()
-        self._latest_position: Optional[tuple[int, ...]] = None
-        self._latest_fault: Optional[tuple[int, ...]] = None
-        self._latest_timestamp = 0.0
-        self._desired_target: Optional[tuple[int, ...]] = None
-        self._last_sent_target: Optional[tuple[int, ...]] = None
-        self._pending_profile: Optional[tuple[tuple[int, ...], tuple[int, ...]]] = None
-        self._recovery_requests: queue.Queue[_O6RecoveryRequest] = queue.Queue()
-        self._error = ""
-        self._phase = "未启动"
+
+        self._device = O6Device(
+            O6Config(
+                port=self.port,
+                sdk_root=self.sdk_root,
+                hand_id=self.hand_id,
+                baudrate=self.baudrate,
+            )
+        )
 
     @property
     def connected(self) -> bool:
-        return self._thread is not None and self._thread.is_alive() and not self.error
+        return self._device.connected
 
     @property
     def error(self) -> str:
-        with self._lock:
-            return self._error
+        return self._device.error
 
     @property
     def phase(self) -> str:
-        with self._lock:
-            return self._phase
+        return self._device.phase
 
-    def latest(self) -> tuple[Optional[tuple[int, ...]], Optional[tuple[int, ...]], float]:
-        with self._lock:
-            return self._latest_position, self._latest_fault, self._latest_timestamp
+    def latest(
+        self,
+    ) -> tuple[
+        Optional[tuple[int, ...]],
+        Optional[tuple[int, ...]],
+        float,
+    ]:
+        snapshot = self._device.latest()
+        if snapshot is None:
+            return None, None, self._device.latest_position_timestamp
+        return (
+            tuple(int(value) for value in snapshot.positions),
+            tuple(int(value) for value in snapshot.faults),
+            float(self._device.latest_position_timestamp),
+        )
 
     @property
     def last_sent_target(self) -> Optional[tuple[int, ...]]:
-        """Return the last six-position command actually written to the O6 bus."""
-        with self._lock:
-            return self._last_sent_target
+        return self._device.last_sent_target
 
     def connect(self, timeout: float = 10.0) -> tuple[int, ...]:
-        if self.connected:
-            position, _, _ = self.latest()
-            if position is None:
-                raise RuntimeError("O6 已连接但没有位置反馈")
-            return position
-        if self._thread is not None:
-            self.close()
-            if self._thread is not None:
-                raise RuntimeError(
-                    f"O6 上一次通信线程仍未退出（阶段={self.phase}），"
-                    "请断开 O6 USB 后重插并重启程序"
-                )
-        if not Path(self.port).exists():
-            raise FileNotFoundError(f"O6 串口不存在: {self.port}")
-        if not os.access(self.port, os.R_OK | os.W_OK):
-            raise PermissionError(f"O6 串口无读写权限: {self.port}")
-        self._stop.clear()
-        self._ready.clear()
-        with self._lock:
-            self._latest_position = None
-            self._latest_fault = None
-            self._latest_timestamp = 0.0
-            self._desired_target = None
-            self._last_sent_target = None
-            self._pending_profile = None
-            self._recovery_requests = queue.Queue()
-            self._error = ""
-            self._phase = "启动通信线程"
-        self._thread = threading.Thread(target=self._run, name="O6-RS485", daemon=True)
-        self._thread.start()
-        if not self._ready.wait(timeout):
-            phase = self.phase
-            error = self.error or f"O6 初始化超时 {timeout:.0f}s（阶段={phase}）"
-            self.close()
-            raise TimeoutError(error)
-        position, _, _ = self.latest()
-        if position is None:
-            raise RuntimeError(self.error or "O6 没有位置反馈")
-        return position
+        snapshot = self._device.connect(timeout=float(timeout))
+        return tuple(int(value) for value in snapshot.positions)
 
     def set_profile(self, speed: Sequence[Any], torque: Sequence[Any]) -> None:
-        profile = (tuple(_six_uint8(speed, "O6 速度")), tuple(_six_uint8(torque, "O6 力矩")))
-        with self._lock:
-            self._pending_profile = profile
+        self._device.set_profile(speed, torque)
 
     def set_target(self, target: Sequence[Any]) -> None:
-        converted = tuple(_six_uint8(target, "O6 目标"))
-        with self._lock:
-            self._desired_target = converted
+        self._device.set_target(target)
 
     def hold_current(self) -> None:
-        position, _, _ = self.latest()
-        if position is not None:
-            self.set_target(position)
+        self._device.hold_current()
 
     def recover_motor(
         self,
@@ -1725,42 +1677,13 @@ class O6Controller:
         timeout: float = 4.0,
         stop_event: Optional[threading.Event] = None,
     ) -> dict[str, Any]:
-        """Safely re-issue control for one motor without writing undocumented registers."""
-        number = int(motor_number)
-        if number < 1 or number > len(O6_MOTOR_NAMES):
-            raise ValueError("O6 电机编号必须为 1～6")
-        speed_value = int(speed)
-        torque_value = int(torque)
-        if not 1 <= speed_value <= 255:
-            raise ValueError("O6 恢复速度必须为 1～255")
-        if not 1 <= torque_value <= 255:
-            raise ValueError("O6 恢复力矩必须为 1～255")
-        if not self.connected:
-            raise RuntimeError("O6 未连接")
-
-        request = _O6RecoveryRequest(
-            motor_index=number - 1,
-            speed=speed_value,
-            torque=torque_value,
-            done=threading.Event(),
-            cancelled=threading.Event(),
+        return self._device.recover_motor(
+            motor_number,
+            speed,
+            torque,
+            timeout=float(timeout),
+            stop_event=stop_event,
         )
-        self._recovery_requests.put(request)
-        deadline = time.monotonic() + float(timeout)
-        while not request.done.wait(0.05):
-            if stop_event is not None and stop_event.is_set():
-                request.cancelled.set()
-                raise RuntimeError(f"O6 {number} 号电机恢复已被软件紧急停止")
-            if time.monotonic() >= deadline:
-                request.cancelled.set()
-                raise TimeoutError(
-                    f"O6 {number} 号电机恢复命令超时（阶段={self.phase}）"
-                )
-        if request.error:
-            raise RuntimeError(request.error)
-        if request.result is None:
-            raise RuntimeError("O6 电机恢复没有返回结果")
-        return request.result
 
     def wait_until_position(
         self,
@@ -1769,207 +1692,30 @@ class O6Controller:
         timeout: float = 15.0,
         stop_event: Optional[threading.Event] = None,
     ) -> bool:
-        converted = tuple(_six_uint8(target, "O6 目标"))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if stop_event is not None and stop_event.is_set():
-                return False
-            position, fault, _ = self.latest()
-            if fault and any(fault):
-                return False
-            if position and max(abs(a - b) for a, b in zip(position, converted)) <= tolerance:
-                return True
-            if self.error:
-                return False
-            time.sleep(0.05)
-        return False
+        return self._device.wait_until_position(
+            target,
+            tolerance=int(tolerance),
+            timeout=float(timeout),
+            stop_event=stop_event,
+        )
 
     def close(self) -> None:
-        self._stop.set()
-        self._fail_pending_recoveries("O6 正在关闭，恢复操作已取消")
-        thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=3.0)
-        if thread is not None and thread.is_alive():
-            with self._lock:
-                if not self._error:
-                    self._error = f"O6 通信线程无法退出（阶段={self._phase}）"
-            return
-        self._thread = None
+        self._device.close()
 
-    def _set_error(self, message: str) -> None:
-        with self._lock:
-            self._error = message
-        self._ready.set()
+    @property
+    def _thread(self) -> Any:
+        return self._device._thread
 
-    def _fail_pending_recoveries(self, message: str) -> None:
-        while True:
-            try:
-                request = self._recovery_requests.get_nowait()
-            except queue.Empty:
-                return
-            request.error = message
-            request.done.set()
+    @_thread.setter
+    def _thread(self, value: Any) -> None:
+        self._device._thread = value
 
-    def _process_recovery(self, hand: Any, request: _O6RecoveryRequest) -> None:
-        index = request.motor_index
-        number = index + 1
-        try:
-            with self._lock:
-                self._phase = f"恢复 O6 {number} 号电机"
+    @property
+    def _recovery_requests(self) -> Any:
+        return self._device._recovery_requests
 
-            before_position = tuple(int(value) for value in hand.get_state())
-            before_fault = tuple(int(value) for value in hand.get_fault())
-            fault_code = before_fault[index]
-            if fault_code not in (0, 1):
-                fault_name = O6_FAULT_NAMES.get(fault_code, "未知故障")
-                raise RuntimeError(
-                    f"O6 {number} 号电机为 {fault_name}（故障码 {fault_code}），"
-                    "禁止软件重新上力"
-                )
-
-            position_setters = (
-                hand.set_thumb_pitch,
-                hand.set_thumb_yaw,
-                hand.set_index_pitch,
-                hand.set_middle_pitch,
-                hand.set_ring_pitch,
-                hand.set_little_pitch,
-            )
-            speed_setters = (
-                hand.set_thumb_speed,
-                hand.set_thumb_yaw_speed,
-                hand.set_index_speed,
-                hand.set_middle_speed,
-                hand.set_ring_speed,
-                hand.set_little_speed,
-            )
-            torque_setters = (
-                hand.set_thumb_torque,
-                hand.set_thumb_yaw_torque,
-                hand.set_index_torque,
-                hand.set_middle_torque,
-                hand.set_ring_torque,
-                hand.set_little_torque,
-            )
-
-            # 先覆盖受阻前的旧目标，再恢复速度和力矩，避免重新上力时突然追旧目标。
-            if request.cancelled.is_set():
-                raise RuntimeError("恢复请求已取消")
-            position_setters[index](before_position[index])
-            if request.cancelled.is_set():
-                raise RuntimeError("恢复请求已取消")
-            speed_setters[index](request.speed)
-            if request.cancelled.is_set():
-                raise RuntimeError("恢复请求已取消")
-            torque_setters[index](request.torque)
-            time.sleep(0.2)
-
-            if request.cancelled.is_set():
-                raise RuntimeError("恢复请求已取消")
-
-            after_position = tuple(int(value) for value in hand.get_state())
-            after_fault = tuple(int(value) for value in hand.get_fault())
-            with self._lock:
-                self._latest_position = after_position
-                self._latest_fault = after_fault
-                self._latest_timestamp = time.monotonic()
-                # 当前位置成为新的保持目标；下次目标变化时仍会正常整手下发。
-                self._desired_target = after_position
-                self._last_sent_target = after_position
-            request.result = {
-                "motor_number": number,
-                "motor_name": O6_MOTOR_NAMES[index],
-                "position_before": before_position[index],
-                "position_after": after_position[index],
-                "fault_before": before_fault,
-                "fault_after": after_fault,
-            }
-        except Exception as exc:
-            request.error = f"O6 {number} 号电机恢复失败: {type(exc).__name__}: {exc}"
-        finally:
-            with self._lock:
-                if self._phase != "异常":
-                    self._phase = "运行中"
-            request.done.set()
-
-    def _run(self) -> None:
-        hand = None
-        try:
-            with self._lock:
-                self._phase = "加载 O6 SDK"
-            if self.sdk_root not in sys.path:
-                sys.path.insert(0, self.sdk_root)
-            from core.rs485.linker_hand_o6_rs485 import LinkerHandO6RS485
-
-            with self._lock:
-                self._phase = "打开 RS485 串口"
-            hand = LinkerHandO6RS485(
-                hand_id=self.hand_id,
-                modbus_port=self.port,
-                baudrate=self.baudrate,
-            )
-            with self._lock:
-                self._phase = "读取 O6 位置"
-            position = tuple(int(value) for value in hand.get_state())
-            with self._lock:
-                self._phase = "读取 O6 故障码"
-            fault = tuple(int(value) for value in hand.get_fault())
-            with self._lock:
-                self._latest_position = position
-                self._latest_fault = fault
-                self._latest_timestamp = time.monotonic()
-                self._phase = "运行中"
-            self._ready.set()
-
-            next_position = time.monotonic() + 0.2
-            next_fault = time.monotonic() + 0.8
-            while not self._stop.is_set():
-                try:
-                    recovery = self._recovery_requests.get_nowait()
-                except queue.Empty:
-                    recovery = None
-                if recovery is not None:
-                    self._process_recovery(hand, recovery)
-
-                with self._lock:
-                    profile = self._pending_profile
-                    self._pending_profile = None
-                    target = self._desired_target
-                if profile is not None:
-                    hand.set_speed(list(profile[0]))
-                    hand.set_torque(list(profile[1]))
-                if target is not None and target != self._last_sent_target:
-                    hand.set_joint_positions(list(target))
-                    self._last_sent_target = target
-
-                now = time.monotonic()
-                if now >= next_position:
-                    position = tuple(int(value) for value in hand.get_state())
-                    with self._lock:
-                        self._latest_position = position
-                        self._latest_timestamp = time.monotonic()
-                    next_position = time.monotonic() + 0.2
-                if now >= next_fault:
-                    fault = tuple(int(value) for value in hand.get_fault())
-                    with self._lock:
-                        self._latest_fault = fault
-                    next_fault = time.monotonic() + 0.8
-                time.sleep(0.01)
-        except Exception as exc:
-            with self._lock:
-                self._phase = "异常"
-            self._set_error(f"O6 通信线程异常: {type(exc).__name__}: {exc}")
-        finally:
-            self._fail_pending_recoveries(self.error or "O6 通信线程已退出")
-            if hand is not None:
-                try:
-                    hand.close()
-                except Exception:
-                    pass
-            with self._lock:
-                if self._phase != "异常":
-                    self._phase = "已关闭"
+    def _process_recovery(self, hand: Any, request: Any) -> None:
+        self._device._process_recovery(hand, request)
 
 
 class NrcRobotAdapter:
