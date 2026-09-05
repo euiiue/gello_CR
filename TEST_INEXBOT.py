@@ -50,6 +50,7 @@ if str(_V2_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_V2_SRC_DIR))
 from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
 from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
+from gello_cr.recording.image_processing import crop_normalized_roi
 
 
 
@@ -3462,15 +3463,6 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             pixmap = pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(pixmap)
 
-    def _base_roi_bounds(self, image_rgb):
-        height, width = image_rgb.shape[:2]
-        x1, y1, x2, y2 = self.base_roi_norm
-        left = max(0, min(width - 1, int(round(x1 * width))))
-        right = max(left + 1, min(width, int(round(x2 * width))))
-        top = max(0, min(height - 1, int(round(y1 * height))))
-        bottom = max(top + 1, min(height, int(round(y2 * height))))
-        return left, top, right, bottom
-
     def CamerasStartAll(self, _checked=False):
         self.D435_1_Start()
         self.D435_2_Start()
@@ -3668,10 +3660,9 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             return
 
         base_rgb = snapshot.image_rgb
-        left, top, right, bottom = self._base_roi_bounds(base_rgb)
-        roi_rgb = np.ascontiguousarray(
-            base_rgb[top:bottom, left:right]
-        ).copy()
+        roi_crop = crop_normalized_roi(base_rgb, self.base_roi_norm)
+        left, top, right, bottom = roi_crop.bounds_px
+        roi_rgb = roi_crop.image_rgb
 
         with self._camera_frame_lock:
             self._base_rgb_frame = base_rgb.copy()
