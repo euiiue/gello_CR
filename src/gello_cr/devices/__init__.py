@@ -5,6 +5,14 @@ these adapters, never NRC/Dynamixel/LinkerHand/RealSense SDKs directly.
 """
 
 from .gello import GelloConfig, GelloDevice
+from .nrc_robot import NrcRobotSession, NrcServoTransition
 from .o6 import O6Config, O6Device
 
-__all__ = ["GelloConfig", "GelloDevice", "O6Config", "O6Device"]
+__all__ = [
+    "GelloConfig",
+    "GelloDevice",
+    "NrcRobotSession",
+    "NrcServoTransition",
+    "O6Config",
+    "O6Device",
+]
