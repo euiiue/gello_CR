@@ -48,6 +48,12 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# V2 package compatibility during staged migration of the legacy Qt entrypoint.
+_V2_SRC_DIR = BASE_DIR / "src"
+if str(_V2_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_V2_SRC_DIR))
+from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
+
 
 
 # INEXBOT class
@@ -1170,6 +1176,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self.socketFd = -1
         self.socketFd_7000 = -1
         self.nrc_adapter = None
+        self.cr3a_device = None
         self._teleop_async_threads = {}
         self._nrc_message_last = {}
 
@@ -3813,66 +3820,61 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
 
         def connect_controller():
             cfg = self.teleop_store.data["robot"]
-            command_fd = -1
-            servo_fd = -1
-            try:
-                command_fd = aa.connect_robot(str(cfg["ip"]), str(cfg["command_port"]))
-                servo_fd = aa.connect_robot(str(cfg["ip"]), str(cfg["servo_port"]))
-                if command_fd <= 0 or servo_fd <= 0:
-                    raise ConnectionError(
-                        f"6001 fd={command_fd}, 7000 fd={servo_fd}"
-                    )
-                self.socketFd = command_fd
-                self.socketFd_7000 = servo_fd
-                self.nrc_adapter = NrcRobotAdapter(
-                    aa,
-                    command_fd,
-                    servo_fd,
-                    robot_num=int(cfg["robot_num"]),
-                    motion_mode=str(cfg["motion_mode"]),
-                    movej_velocity=float(cfg["movej_velocity"]),
-                    movej_acc=float(cfg["movej_acc"]),
-                    movej_dec=float(cfg["movej_dec"]),
-                    movej_period_s=float(cfg["movej_period_s"]),
-                    movej_low_latency=bool(cfg["movej_low_latency"]),
-                )
-                self.nrc_adapter.wait_connections_ready()
-                # Keep a strong reference to the SWIG callback for the lifetime
-                # of the connection.  Do not call motion APIs from this SDK
-                # callback thread; only forward the complete controller message
-                # to the thread-safe Qt event queue.
-                def nrc_message_callback(message_type, message, message_code):
-                    self.nrc_adapter.record_controller_message(
-                        message_type, message, message_code
-                    )
-                    message_key = (int(message_type), int(message_code), str(message))
-                    now = time.monotonic()
-                    if now - self._nrc_message_last.get(message_key, 0.0) < 1.0:
-                        return
-                    self._nrc_message_last[message_key] = now
-                    self._teleop_event(
-                        "warning",
-                        "纳博特控制柜消息："
-                        f"type={message_type}, code={message_code}, message={message}",
-                    )
+            device = None
 
-                self._nrc_message_callback = nrc_message_callback
-                try:
-                    callback_result = aa.set_receive_error_or_warnning_message_callback(
-                        command_fd, self._nrc_message_callback
-                    )
-                except Exception as callback_exc:
-                    self._teleop_event(
-                        "warning",
-                        f"注册纳博特报警回调失败：{callback_exc}",
-                    )
-                else:
-                    if callback_result not in (None, 0):
-                        self._teleop_event(
-                            "warning",
-                            f"注册纳博特报警回调失败，返回值={callback_result}",
-                        )
-                self.teleop_engine.attach_robot(self.nrc_adapter)
+            def forward_cr3a_event(level, message):
+                message_text = str(message)
+                message_key = (str(level), message_text)
+                now = time.monotonic()
+                if (
+                    str(level) == "warning"
+                    and now - self._nrc_message_last.get(message_key, 0.0) < 1.0
+                ):
+                    return
+                self._nrc_message_last[message_key] = now
+                self._teleop_event(str(level), message_text)
+
+            try:
+                old_device = self.cr3a_device
+                if old_device is not None:
+                    old_device.close()
+
+                self.cr3a_device = None
+                self.nrc_adapter = None
+                self.socketFd = -1
+                self.socketFd_7000 = -1
+
+                device = Cr3aDevice(
+                    Cr3aConfig(
+                        ip=str(cfg["ip"]),
+                        command_port=int(cfg["command_port"]),
+                        servo_port=int(cfg["servo_port"]),
+                        robot_num=int(cfg["robot_num"]),
+                        motion_mode=str(cfg["motion_mode"]),
+                        movej_velocity=float(cfg["movej_velocity"]),
+                        movej_acc=float(cfg["movej_acc"]),
+                        movej_dec=float(cfg["movej_dec"]),
+                        movej_period_s=float(cfg["movej_period_s"]),
+                        movej_low_latency=bool(cfg["movej_low_latency"]),
+                        servoj_vmax=float(cfg["servoj_vmax"]),
+                        servoj_amax=float(cfg["servoj_amax"]),
+                        servoj_jmax=float(cfg["servoj_jmax"]),
+                        sdk_root=str(BASE_DIR / "TESTRobot_INEXBOT"),
+                    ),
+                    event_callback=forward_cr3a_event,
+                )
+
+                device.connect(timeout=10.0)
+                session = device.session
+                if session is None:
+                    raise RuntimeError("CR3A 已连接但 NRC session 未创建")
+
+                self.cr3a_device = device
+                self.socketFd = device.command_fd
+                self.socketFd_7000 = device.servo_fd
+                self.nrc_adapter = session
+
+                self.teleop_engine.attach_robot(session)
                 self.robot1_connected = True
                 self._teleop_event(
                     "info",
@@ -3881,12 +3883,12 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                 )
             except Exception:
                 self.robot1_connected = False
-                for fd in (command_fd, servo_fd):
-                    if fd > 0:
-                        try:
-                            aa.disconnect_robot(fd)
-                        except Exception:
-                            pass
+                self.nrc_adapter = None
+                self.socketFd = -1
+                self.socketFd_7000 = -1
+                self.cr3a_device = None
+                if device is not None:
+                    device.close()
                 raise
 
         self._run_teleop_async("连接纳博特控制柜", connect_controller)
@@ -4603,12 +4605,16 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                 self._teleop_event("error", "NRC 状态线程未退出，暂不关闭 socket")
                 self.timer_teleop_ui.start(100)
                 return
-        for fd in (self.socketFd, self.socketFd_7000):
-            if fd > 0:
-                try:
-                    aa.disconnect_robot(fd)
-                except Exception as exc:
-                    self._teleop_event("error", f"退出时 NRC 断开失败 fd={fd}：{exc}")
+        cr3a_device = getattr(self, "cr3a_device", None)
+        if cr3a_device is not None:
+            try:
+                cr3a_device.close()
+            except Exception as exc:
+                self._teleop_event("error", f"退出时 CR3A 设备关闭失败：{exc}")
+        self.cr3a_device = None
+        self.nrc_adapter = None
+        self.socketFd = -1
+        self.socketFd_7000 = -1
         self.robot1_connected = False
         self.refresh_teleop_ui()
         for handler in self._file_logger.handlers:
