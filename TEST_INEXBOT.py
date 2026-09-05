@@ -34,10 +34,6 @@ import json
 import sys
 import cv2
 import numpy as np
-try:
-    import pyrealsense2 as rs
-except ImportError:
-    rs = None
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QHBoxLayout
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QImage, QPixmap
@@ -53,6 +49,7 @@ _V2_SRC_DIR = BASE_DIR / "src"
 if str(_V2_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_V2_SRC_DIR))
 from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
+from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
 
 
 
@@ -1295,22 +1292,27 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         )
         self._setup_d435_2_ui()
 
-        # 初始化两套独立 pipeline，必须按序列号绑定，不能依赖 USB 枚举顺序。
-        self.pipeline = rs.pipeline() if rs is not None else None
-        self.config = rs.config() if rs is not None else None
-        self.pipeline_D435_2 = rs.pipeline() if rs is not None else None
-        self.config_D435_2 = rs.config() if rs is not None else None
+        # V2 owns the two physical RealSense RGB pipelines. The Qt window only
+        # renders CameraSnapshot objects and keeps legacy frame caches for the
+        # recorder compatibility bridge.
+        self.wrist_camera_device = RealSenseRgbDevice(
+            RealSenseRgbConfig(
+                serial=self.wrist_camera_serial,
+                width=640,
+                height=480,
+                fps=30,
+            )
+        )
+        self.base_camera_device = RealSenseRgbDevice(
+            RealSenseRgbConfig(
+                serial=self.base_camera_serial,
+                width=640,
+                height=480,
+                fps=30,
+            )
+        )
         self.D435_1_Started = False
         self.D435_2_Started = False
-
-        # 腕部相机保留彩色 + 深度预览；训练仅记录 RGB。
-        if rs is not None:
-            self.config.enable_device(self.wrist_camera_serial)
-            self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            self.config_D435_2.enable_device(self.base_camera_serial)
-            self.config_D435_2.enable_stream(
-                rs.stream.color, 640, 480, rs.format.bgr8, 30
-            )
 
         self.btnD435_1_Start.clicked.connect(self.D435_1_Start)
         self.btnD435_1_Stop.clicked.connect(self.D435_1_Stop)
@@ -3485,37 +3487,43 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self.D435_2_Stop()
 
     def D435_1_Start(self):
-        if rs is None:
-            self._teleop_event("error", "未安装 pyrealsense2，D435 页面不可用")
-            return
         if self.D435_1_Started:
             self._teleop_event("info", "CAMERA1 腕部相机已经启动")
             return
         try:
-            self.pipeline.start(self.config)
+            self.wrist_camera_device.connect(timeout=5.0)
             self.D435_1_Started = True
-            self.timer_D435_1 = QTimer(self)
-            self.timer_D435_1.timeout.connect(self.update_frame_D435_1)
+            timer = getattr(self, "timer_D435_1", None)
+            if timer is None:
+                self.timer_D435_1 = QTimer(self)
+                self.timer_D435_1.timeout.connect(self.update_frame_D435_1)
             self.timer_D435_1.start(30)
             self._teleop_event(
-                "info", f"CAMERA1 腕部相机已启动: {self.wrist_camera_serial}"
+                "info",
+                f"CAMERA1 腕部相机已启动: {self.wrist_camera_serial}",
             )
         except Exception as exc:
             self.D435_1_Started = False
+            self.wrist_camera_device.close()
             self._teleop_event("error", f"CAMERA1 腕部相机启动失败: {exc}")
 
     def D435_1_Stop(self):
-        if self.lerobot_recorder.snapshot()["episode_active"] or self._episode_operation_lock.locked():
-            self._teleop_event("warning", "请先结束录制并等待 Episode 操作完成，再停止相机")
+        if (
+            self.lerobot_recorder.snapshot()["episode_active"]
+            or self._episode_operation_lock.locked()
+        ):
+            self._teleop_event(
+                "warning",
+                "请先结束录制并等待 Episode 操作完成，再停止相机",
+            )
             return
         timer = getattr(self, "timer_D435_1", None)
         if timer is not None:
             timer.stop()
-        if self.D435_1_Started:
-            try:
-                self.pipeline.stop()
-            except Exception as exc:
-                self._teleop_event("error", f"CAMERA1 停止失败: {exc}")
+        try:
+            self.wrist_camera_device.close()
+        except Exception as exc:
+            self._teleop_event("error", f"CAMERA1 停止失败: {exc}")
         self.D435_1_Started = False
         with self._camera_frame_lock:
             self._wrist_rgb_frame = None
@@ -3544,42 +3552,41 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
     def update_frame_D435_1(self):
         if not self.D435_1_Started:
             return
-        try:
-            frames = self.pipeline.poll_for_frames()
-            if not frames:
-                return
-            color_frame = frames.get_color_frame()
-            if not color_frame:
-                return
-            received_at = time.monotonic()
-            color_image = np.asanyarray(color_frame.get_data())
-        except RuntimeError as exc:
-            self.timer_D435_1.stop()
+
+        error = self.wrist_camera_device.error
+        if error:
+            timer = getattr(self, "timer_D435_1", None)
+            if timer is not None:
+                timer.stop()
             self.D435_1_Started = False
-            self._teleop_event("error", f"腕部相机取帧失败，采集将停止：{exc}")
-            try:
-                self.pipeline.stop()
-            except RuntimeError as stop_exc:
-                self._teleop_event("error", f"腕部相机清理失败：{stop_exc}")
+            self.wrist_camera_device.close()
+            self._teleop_event(
+                "error",
+                f"腕部相机取帧失败，采集将停止：{error}",
+            )
             return
-        image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+
+        snapshot = self.wrist_camera_device.latest()
+        if snapshot is None:
+            return
+
+        image_rgb = snapshot.image_rgb
         with self._camera_frame_lock:
-            self._wrist_rgb_frame = image_rgb
-            self._wrist_rgb_timestamp = received_at
+            self._wrist_rgb_frame = image_rgb.copy()
+            self._wrist_rgb_timestamp = float(snapshot.timestamp)
         self._set_rgb_pixmap(self.D435_Pic_Color, image_rgb)
 
     def D435_2_Start(self):
-        if rs is None:
-            self._teleop_event("error", "未安装 pyrealsense2，CAMERA2 页面不可用")
-            return
         if self.D435_2_Started:
             self._teleop_event("info", "CAMERA2 基座相机已经启动")
             return
         try:
-            self.pipeline_D435_2.start(self.config_D435_2)
+            self.base_camera_device.connect(timeout=5.0)
             self.D435_2_Started = True
-            self.timer_D435_2 = QTimer(self)
-            self.timer_D435_2.timeout.connect(self.update_frame_D435_2)
+            timer = getattr(self, "timer_D435_2", None)
+            if timer is None:
+                self.timer_D435_2 = QTimer(self)
+                self.timer_D435_2.timeout.connect(self.update_frame_D435_2)
             self.timer_D435_2.start(30)
             self._teleop_event(
                 "info",
@@ -3588,20 +3595,26 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             )
         except Exception as exc:
             self.D435_2_Started = False
+            self.base_camera_device.close()
             self._teleop_event("error", f"CAMERA2 基座相机启动失败: {exc}")
 
     def D435_2_Stop(self):
-        if self.lerobot_recorder.snapshot()["episode_active"] or self._episode_operation_lock.locked():
-            self._teleop_event("warning", "请先结束录制并等待 Episode 操作完成，再停止相机")
+        if (
+            self.lerobot_recorder.snapshot()["episode_active"]
+            or self._episode_operation_lock.locked()
+        ):
+            self._teleop_event(
+                "warning",
+                "请先结束录制并等待 Episode 操作完成，再停止相机",
+            )
             return
         timer = getattr(self, "timer_D435_2", None)
         if timer is not None:
             timer.stop()
-        if self.D435_2_Started:
-            try:
-                self.pipeline_D435_2.stop()
-            except Exception as exc:
-                self._teleop_event("error", f"CAMERA2 停止失败: {exc}")
+        try:
+            self.base_camera_device.close()
+        except Exception as exc:
+            self._teleop_event("error", f"CAMERA2 停止失败: {exc}")
         self.D435_2_Started = False
         with self._camera_frame_lock:
             self._base_rgb_frame = None
@@ -3636,31 +3649,34 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
     def update_frame_D435_2(self):
         if not self.D435_2_Started:
             return
-        try:
-            frames = self.pipeline_D435_2.poll_for_frames()
-            if not frames:
-                return
-            color_frame = frames.get_color_frame()
-            if not color_frame:
-                return
-            received_at = time.monotonic()
-            color_bgr = np.asanyarray(color_frame.get_data())
-        except RuntimeError as exc:
-            self.timer_D435_2.stop()
+
+        error = self.base_camera_device.error
+        if error:
+            timer = getattr(self, "timer_D435_2", None)
+            if timer is not None:
+                timer.stop()
             self.D435_2_Started = False
-            self._teleop_event("error", f"基座相机取帧失败，采集将停止：{exc}")
-            try:
-                self.pipeline_D435_2.stop()
-            except RuntimeError as stop_exc:
-                self._teleop_event("error", f"基座相机清理失败：{stop_exc}")
+            self.base_camera_device.close()
+            self._teleop_event(
+                "error",
+                f"基座相机取帧失败，采集将停止：{error}",
+            )
             return
-        base_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+
+        snapshot = self.base_camera_device.latest()
+        if snapshot is None:
+            return
+
+        base_rgb = snapshot.image_rgb
         left, top, right, bottom = self._base_roi_bounds(base_rgb)
-        roi_rgb = np.ascontiguousarray(base_rgb[top:bottom, left:right]).copy()
+        roi_rgb = np.ascontiguousarray(
+            base_rgb[top:bottom, left:right]
+        ).copy()
+
         with self._camera_frame_lock:
-            self._base_rgb_frame = base_rgb
+            self._base_rgb_frame = base_rgb.copy()
             self._base_roi_rgb_frame = roi_rgb
-            self._base_rgb_timestamp = received_at
+            self._base_rgb_timestamp = float(snapshot.timestamp)
 
         overlay = base_rgb.copy()
         cv2.rectangle(
@@ -3673,12 +3689,12 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self._set_rgb_pixmap(self.D435_2_Pic_Color, overlay)
         self._set_rgb_pixmap(self.D435_2_Pic_ROI, roi_rgb)
         self.D435_2_Status.setText(
-            f"基座序列号 {self.base_camera_serial} | ROI {list(self.base_roi_norm)} | "
+            f"基座序列号 {self.base_camera_serial} | "
+            f"ROI {list(self.base_roi_norm)} | "
             f"像素 ({left},{top})→({right},{bottom}) | "
             f"裁剪 {right-left}×{bottom-top}"
         )
 
-    # LINKER_HAND....................................................................
     def _init_linker_hand_type(self):
         try:
             self.yaml = LoadWriteYaml() # 初始化配置文件
@@ -4586,15 +4602,17 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                     self._teleop_event("error", f"{name} 尚未退出，暂不关闭连接；请检查日志")
                     self.timer_teleop_ui.start(100)
                     return
-        for started, pipeline in (
-            (self.D435_1_Started, self.pipeline),
-            (self.D435_2_Started, self.pipeline_D435_2),
+        for label, device in (
+            ("腕部", self.wrist_camera_device),
+            ("基座", self.base_camera_device),
         ):
-            if started:
-                try:
-                    pipeline.stop()
-                except RuntimeError as exc:
-                    self._teleop_event("error", f"退出时相机停止失败：{exc}")
+            try:
+                device.close()
+            except Exception as exc:
+                self._teleop_event(
+                    "error",
+                    f"退出时{label}相机停止失败：{exc}",
+                )
         self.D435_1_Started = False
         self.D435_2_Started = False
         robot_poll_thread = getattr(self, "_robot_poll_thread", None)
