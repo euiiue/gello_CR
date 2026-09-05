@@ -53,6 +53,28 @@ class RobotSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class CameraSnapshot:
+    timestamp: float
+    serial: str
+    image_rgb: object
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.timestamp):
+            raise ValueError("camera timestamp must be finite")
+        if not self.serial:
+            raise ValueError("camera serial cannot be empty")
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("camera width/height must be positive")
+        shape = getattr(self.image_rgb, "shape", None)
+        if shape != (self.height, self.width, 3):
+            raise ValueError(
+                "camera RGB image shape must match (height, width, 3)"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class HandSnapshot:
     timestamp: float
     positions: tuple[int, ...]
@@ -61,6 +83,19 @@ class HandSnapshot:
     def __post_init__(self) -> None:
         if len(self.positions) != len(self.faults):
             raise ValueError("hand positions and faults must have the same length")
+
+
+
+@runtime_checkable
+class CameraDevice(Protocol):
+    @property
+    def connected(self) -> bool: ...
+
+    def connect(self, timeout: float = 5.0) -> CameraSnapshot: ...
+
+    def latest(self) -> CameraSnapshot | None: ...
+
+    def close(self) -> None: ...
 
 
 @runtime_checkable
