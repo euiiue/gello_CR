@@ -1,0 +1,3 @@
+[submodule "TESTHand_LINKERBOT/linker_hand_python_sdk"]
+	path = TESTHand_LINKERBOT/linker_hand_python_sdk
+	url = https://github.com/linker-bot/linker_hand_python_sdk.git

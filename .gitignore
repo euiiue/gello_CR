@@ -1,0 +1,25 @@
+# Machine-local Python/Conda runtime used by run_test_inexbot.sh.
+/bin/
+/lib/
+/include/
+/compiler_compat/
+/conda-meta/
+/etc/
+/share/
+/ssl/
+/man/
+/x86_64-conda-linux-gnu/
+
+# Runtime output and historical snapshots.
+/logs/
+/data/
+/backup_*/
+/~/
+
+# Generated Python/IDE files.
+**/__pycache__/
+*.py[cod]
+.idea/
+
+# Downloaded/archive copies; keep source files instead.
+*.zip
