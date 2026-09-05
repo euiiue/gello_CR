@@ -25,6 +25,19 @@ from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
+# V2 package compatibility during the staged migration. The legacy application
+# is still launched from the repository root, while new code uses a src layout.
+try:
+    from gello_cr.devices.gello import GelloConfig, GelloDevice
+except ModuleNotFoundError as exc:
+    if exc.name != "gello_cr":
+        raise
+    _V2_SRC_DIR = Path(__file__).resolve().parent / "src"
+    if str(_V2_SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(_V2_SRC_DIR))
+    from gello_cr.devices.gello import GelloConfig, GelloDevice
+
+
 
 ROARM_DEFAULT_PORT = (
     "/dev/serial/by-id/"
@@ -1122,6 +1135,8 @@ class Inverse3Controller:
 
 @dataclass(frozen=True)
 class GelloFeedback:
+    """Legacy GELLO feedback view kept while the old UI/runtime is migrated."""
+
     timestamp: float
     joints_rad: tuple[float, float, float, float, float, float, float]
 
@@ -1139,7 +1154,7 @@ class GelloFeedback:
 
 
 class GelloController:
-    """Read-only GELLO Dynamixel feedback for Inext teleoperation."""
+    """Legacy-compatible facade over the V2 GelloDevice."""
 
     master_type = "gello"
     passive = True
@@ -1165,114 +1180,73 @@ class GelloController:
         self.baudrate = int(baudrate)
         self.feedback_hz = float(feedback_hz)
         self.feedback_timeout_s = float(feedback_timeout_s)
-        self._robot: Any = None
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-        self._ready = threading.Event()
-        self._lock = threading.RLock()
-        self._latest: Optional[GelloFeedback] = None
-        self._error = ""
 
-    @property
-    def io_alive(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        if len(self.gripper_config) != 3:
+            raise ValueError("GELLO gripper_config 必须包含 ID/open/close 三个值")
 
-    @property
-    def connected(self) -> bool:
-        return self.io_alive and not self.error
-
-    @property
-    def error(self) -> str:
-        with self._lock:
-            return self._error
-
-    def latest(self) -> Optional[GelloFeedback]:
-        with self._lock:
-            return self._latest
-
-    def connect(self, timeout: float = 5.0) -> GelloFeedback:
-        if self.connected:
-            latest = self.latest()
-            if latest is None:
-                raise RuntimeError("GELLO 已连接但没有反馈")
-            return latest
-        self.close()
-        import sys
-
-        if self.software_root not in sys.path:
-            sys.path.insert(0, self.software_root)
-        from gello.robots.dynamixel import DynamixelRobot
-
-        self._robot = DynamixelRobot(
+        config = GelloConfig(
+            port=self.port,
+            software_root=self.software_root,
             joint_ids=self.joint_ids,
             joint_offsets=self.joint_offsets,
             joint_signs=self.joint_signs,
-            real=True,
-            port=self.port,
+            gripper_config=(
+                int(self.gripper_config[0]),
+                float(self.gripper_config[1]),
+                float(self.gripper_config[2]),
+            ),
             baudrate=self.baudrate,
-            gripper_config=self.gripper_config,
+            feedback_hz=self.feedback_hz,
+            feedback_timeout_s=self.feedback_timeout_s,
         )
-        self._stop.clear()
-        self._ready.clear()
-        with self._lock:
-            self._latest = None
-            self._error = ""
-        self._thread = threading.Thread(
-            target=self._run,
-            name="GELLO-Feedback",
-            daemon=True,
+        self._device = GelloDevice(config)
+
+    @property
+    def io_alive(self) -> bool:
+        return self._device.io_alive
+
+    @property
+    def connected(self) -> bool:
+        return self._device.connected
+
+    @property
+    def error(self) -> str:
+        return self._device.error
+
+    @staticmethod
+    def _legacy_feedback(snapshot: Any) -> GelloFeedback:
+        arm = tuple(float(value) for value in snapshot.joints.positions_rad)
+        if len(arm) != 6:
+            raise RuntimeError("V2 GELLO arm feedback must contain 6 joints")
+        try:
+            gripper = float(snapshot.auxiliary["gripper"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("V2 GELLO feedback is missing auxiliary gripper") from exc
+        return GelloFeedback(
+            timestamp=float(snapshot.timestamp),
+            joints_rad=(
+                arm[0],
+                arm[1],
+                arm[2],
+                arm[3],
+                arm[4],
+                arm[5],
+                gripper,
+            ),
         )
-        self._thread.start()
-        if not self._ready.wait(float(timeout)):
-            error = self.error or "GELLO 反馈启动超时"
-            self.close()
-            raise TimeoutError(error)
-        if self.error:
-            error = self.error
-            self.close()
-            raise RuntimeError(error)
-        latest = self.latest()
-        if latest is None:
-            raise RuntimeError("GELLO 没有有效反馈")
-        return latest
+
+    def latest(self) -> Optional[GelloFeedback]:
+        snapshot = self._device.latest()
+        if snapshot is None:
+            return None
+        return self._legacy_feedback(snapshot)
+
+    def connect(self, timeout: float = 5.0) -> GelloFeedback:
+        return self._legacy_feedback(self._device.connect(timeout=float(timeout)))
 
     def close(self, hold: bool = False) -> None:
         del hold
-        self._stop.set()
-        thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-        if thread is not None and thread.is_alive():
-            raise TimeoutError("GELLO 反馈线程未能退出")
-        robot = self._robot
-        self._robot = None
-        self._thread = None
-        if robot is not None:
-            robot.close()
-
-    def _run(self) -> None:
-        period = 1.0 / self.feedback_hz
-        next_cycle = time.monotonic()
-        try:
-            while not self._stop.is_set():
-                values = tuple(float(value) for value in self._robot.get_joint_state())
-                if len(values) != 7 or any(not math.isfinite(value) for value in values):
-                    raise RuntimeError("GELLO 反馈必须包含 7 个有限数值")
-                feedback = GelloFeedback(time.monotonic(), values)  # type: ignore[arg-type]
-                with self._lock:
-                    self._latest = feedback
-                self._ready.set()
-                next_cycle += period
-                wait_time = next_cycle - time.monotonic()
-                if wait_time > 0:
-                    self._stop.wait(wait_time)
-                else:
-                    next_cycle = time.monotonic()
-        except Exception as exc:
-            if not self._stop.is_set():
-                with self._lock:
-                    self._error = f"GELLO 反馈线程异常: {type(exc).__name__}: {exc}"
-                self._ready.set()
+        self._device.close()
 
 
 @dataclass(frozen=True)
