@@ -28,6 +28,7 @@ import numpy as np
 # V2 package compatibility during the staged migration. The legacy application
 # is still launched from the repository root, while new code uses a src layout.
 try:
+    from gello_cr.control.joint_mapping import RelativeJointMapper
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -37,6 +38,7 @@ except ModuleNotFoundError as exc:
     _V2_SRC_DIR = Path(__file__).resolve().parent / "src"
     if str(_V2_SRC_DIR) not in sys.path:
         sys.path.insert(0, str(_V2_SRC_DIR))
+    from gello_cr.control.joint_mapping import RelativeJointMapper
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -2243,9 +2245,11 @@ class TeleopEngine:
         robot_cfg = cfg["robot"]
         gello_cfg = cfg["gello"]
         o6_cfg = cfg["o6"]
-        joint_scale = float(gello_cfg["joint_scale"])
-        locked_joint_indices = tuple(
-            int(value) - 1 for value in gello_cfg["locked_joints"]
+        joint_mapper = RelativeJointMapper(
+            joint_scale=float(gello_cfg["joint_scale"]),
+            locked_joints=tuple(
+                int(value) for value in gello_cfg["locked_joints"]
+            ),
         )
         motion_mode = getattr(self.robot, "motion_mode", "servoj")
         low_latency = motion_mode == "movej" and bool(robot_cfg["movej_low_latency"])
@@ -2359,13 +2363,14 @@ class TeleopEngine:
                         raise RuntimeError("GELLO 跟随已被软件紧急停止")
 
                 leader = np.asarray(master.arm_joints_rad, dtype=float)
-                relative = joint_scale * np.arctan2(
-                    np.sin(leader - leader_origin),
-                    np.cos(leader - leader_origin),
+                target = np.asarray(
+                    joint_mapper.target_deg(
+                        leader,
+                        leader_origin,
+                        commanded,
+                    ),
+                    dtype=float,
                 )
-                if locked_joint_indices:
-                    relative[list(locked_joint_indices)] = 0.0
-                target = commanded + np.rad2deg(relative)
                 target_delta_rad = np.abs(np.deg2rad(target - last_target))
                 if np.max(target_delta_rad) > step_limit:
                     index = int(np.argmax(target_delta_rad))
@@ -2374,14 +2379,13 @@ class TeleopEngine:
                         f"{target_delta_rad[index]:.4f}rad exceeds {step_limit:.4f}rad"
                     )
                 if master.timestamp != last_leader_timestamp:
-                    leader_delta_rad = joint_scale * np.abs(
-                        np.arctan2(
-                            np.sin(leader - last_leader),
-                            np.cos(leader - last_leader),
-                        )
+                    leader_delta_rad = np.asarray(
+                        joint_mapper.leader_delta_rad(
+                            leader,
+                            last_leader,
+                        ),
+                        dtype=float,
                     )
-                    if locked_joint_indices:
-                        leader_delta_rad[list(locked_joint_indices)] = 0.0
                     change_period = max(
                         1e-3, master.timestamp - last_leader_timestamp
                     )
