@@ -56,7 +56,7 @@ from gello_cr.app import (
     ApplicationService,
     RuntimeCommandBindings,
     RuntimeLifecycleCallbacks,
-    workflow_ui_policy,
+    build_application_view_model,
 )
 from gello_cr.core.state_machine import Command, WorkflowState
 
@@ -1799,14 +1799,8 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         if widget is not None:
             widget.setEnabled(widget.isEnabled() and bool(allowed))
 
-    def _apply_application_workflow_gates(self, dataset):
-        episode_active = bool(dataset["episode_active"])
-        episode_pending = bool(dataset["buffered_frames"]) and not episode_active
-        policy = workflow_ui_policy(
-            self.app_service.state,
-            episode_active=episode_active,
-            episode_pending=episode_pending,
-        )
+    def _apply_application_workflow_gates(self, view_model):
+        policy = view_model.policy
 
         # Application state is the workflow gate. Existing device/busy checks
         # have already run in refresh_teleop_ui(), so this only narrows access.
@@ -1871,7 +1865,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         outcome = self.lerobot_outcome.currentData()
         if outcome == "success":
             save_allowed = policy.save_success
-        elif outcome == "failure" or dataset["error"]:
+        elif outcome == "failure" or view_model.recording_error:
             save_allowed = policy.save_failure
         else:
             save_allowed = (
@@ -3045,6 +3039,23 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self._sync_application_runtime_state()
         self._drain_application_events()
         dataset = self.lerobot_recorder.snapshot()
+        app_view_model = build_application_view_model(
+            self.app_service.snapshot(),
+            snapshot,
+            dataset,
+        )
+        self._latest_application_view_model = app_view_model
+        self.teleop_state_label.setText(app_view_model.headline)
+        self.teleop_state_label.setToolTip(
+            app_view_model.application_error
+            or app_view_model.runtime_error
+            or app_view_model.recording_error
+            or (
+                f"Application={app_view_model.workflow_label}; "
+                f"Runtime={app_view_model.runtime_state}; "
+                f"Recovery={app_view_model.recovery_state.name}"
+            )
+        )
         cfg = self.teleop_store.data
         now = time.monotonic()
         state = snapshot["state"]
@@ -3282,7 +3293,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                     "准备流程结束；请按页面反馈逐项检查，不会自动启动跟随",
                 )
 
-        self._apply_application_workflow_gates(dataset)
+        self._apply_application_workflow_gates(app_view_model)
 
         while True:
             try:

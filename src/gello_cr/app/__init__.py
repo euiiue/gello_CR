@@ -12,6 +12,10 @@ from .service import (
     ApplicationSnapshot,
     CommandResult,
 )
+from .view_model import (
+    ApplicationViewModel,
+    build_application_view_model,
+)
 from .workflow_ui import WorkflowUiPolicy, workflow_ui_policy
 
 __all__ = [
@@ -19,10 +23,12 @@ __all__ = [
     "ApplicationEventBuffer",
     "ApplicationService",
     "ApplicationSnapshot",
+    "ApplicationViewModel",
     "CommandResult",
     "EventLevel",
     "RuntimeCommandBindings",
     "RuntimeLifecycleCallbacks",
+    "build_application_view_model",
     "WorkflowUiPolicy",
     "workflow_ui_policy",
 ]
