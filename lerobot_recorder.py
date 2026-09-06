@@ -40,120 +40,15 @@ from gello_cr.recording.protocol import (
     receive_packet as _receive_packet,
     send_packet as _send_packet,
 )
+from gello_cr.recording.worker_client import (
+    WorkerClient as _WorkerClient,
+    WorkerClientError as LeRobotRecorderError,
+)
 from gello_cr.recording.schema import (
     dataset_features as v2_dataset_features,
     validate_recording_sample,
 )
 
-
-
-class LeRobotRecorderError(RuntimeError):
-    pass
-
-
-
-
-class _WorkerClient:
-    def __init__(self, python_executable: str):
-        executable = Path(python_executable).expanduser()
-        if not executable.is_file():
-            raise FileNotFoundError(f"LeRobot Python does not exist: {executable}")
-        parent_socket, child_socket = socket.socketpair()
-        self._socket = parent_socket
-        self._request_lock = threading.Lock()
-        self._communication_error = ""
-        self._stderr_lines: deque[str] = deque(maxlen=30)
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        worker_lib = executable.parent.parent / "lib"
-        inherited_library_path = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = str(worker_lib) + (
-            f":{inherited_library_path}" if inherited_library_path else ""
-        )
-        self._process = subprocess.Popen(
-            [
-                str(executable),
-                str(Path(__file__).resolve()),
-                "--worker-fd",
-                str(child_socket.fileno()),
-            ],
-            pass_fds=(child_socket.fileno(),),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        child_socket.close()
-        self._stderr_thread = threading.Thread(
-            target=self._collect_stderr,
-            name="LeRobot-Worker-Stderr",
-            daemon=True,
-        )
-        self._stderr_thread.start()
-
-    def _collect_stderr(self) -> None:
-        stream = self._process.stderr
-        if stream is None:
-            return
-        for line in stream:
-            text = line.rstrip()
-            if text:
-                self._stderr_lines.append(text)
-
-    def request(
-        self,
-        payload: dict[str, Any],
-        raw: bytes = b"",
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        with self._request_lock:
-            if self._communication_error:
-                raise LeRobotRecorderError(self._communication_error)
-            if self._process.poll() is not None:
-                details = "\n".join(self._stderr_lines)
-                raise LeRobotRecorderError(
-                    f"LeRobot worker exited with code {self._process.returncode}"
-                    + (f":\n{details}" if details else "")
-                )
-            previous_timeout = self._socket.gettimeout()
-            self._socket.settimeout(timeout)
-            try:
-                _send_packet(self._socket, payload, raw)
-                response, _ = _receive_packet(self._socket)
-            except (OSError, EOFError, ValueError) as exc:
-                details = "\n".join(self._stderr_lines)
-                self._communication_error = (
-                    f"LeRobot worker communication failed: {exc}"
-                    + (f"\n{details}" if details else "")
-                )
-                # A late response must never be mistaken for the next request's
-                # acknowledgement after a timeout (there are no request IDs).
-                raise LeRobotRecorderError(self._communication_error) from exc
-            finally:
-                self._socket.settimeout(previous_timeout)
-            if not response.get("ok", False):
-                raise LeRobotRecorderError(str(response.get("error", "Unknown worker error")))
-            return response
-
-    def close(self) -> None:
-        try:
-            self._socket.close()
-        except OSError:
-            pass
-        if self._process.poll() is None:
-            try:
-                self._process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2.0)
-        if self._process.stderr is not None:
-            self._process.stderr.close()
 
 
 class LeRobotEpisodeRecorder:
@@ -211,7 +106,10 @@ class LeRobotEpisodeRecorder:
         prefix_owner, prefix_name = self.repo_prefix.split("/", 1)
         repo_id = f"{prefix_owner}/{prefix_name}_{stamp}"
         session_root = Path(base_root).expanduser().resolve() / f"{prefix_name}_{stamp}"
-        client = _WorkerClient(self.worker_python)
+        client = _WorkerClient(
+            self.worker_python,
+            worker_script=Path(__file__).resolve(),
+        )
         try:
             response = client.request(
                 {

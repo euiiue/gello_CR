@@ -38,14 +38,20 @@ def test_root_recorder_no_longer_defines_protocol_functions() -> None:
 
 
 def test_worker_client_request_keeps_same_send_receive_calls() -> None:
-    source = _class_source("_WorkerClient")
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src/gello_cr/recording/worker_client.py"
+    ).read_text(encoding="utf-8")
 
-    assert "_send_packet(self._socket, payload, raw)" in source
-    assert "response, _ = _receive_packet(self._socket)" in source
+    assert "send_packet(self._socket, payload, raw)" in source
+    assert "response, _ = receive_packet(self._socket)" in source
 
 
 def test_worker_client_preserves_timeout_and_late_response_safety_behavior() -> None:
-    source = _class_source("_WorkerClient")
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src/gello_cr/recording/worker_client.py"
+    ).read_text(encoding="utf-8")
 
     assert "self._socket.settimeout(timeout)" in source
     assert "self._socket.settimeout(previous_timeout)" in source

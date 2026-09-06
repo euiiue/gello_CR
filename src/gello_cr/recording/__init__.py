@@ -19,6 +19,7 @@ from .schema import (
     dataset_features,
     validate_recording_sample,
 )
+from .worker_client import WorkerClient, WorkerClientError
 
 __all__ = [
     "LEROBOT_IMAGE_FEATURE_KEYS",
@@ -27,6 +28,8 @@ __all__ = [
     "PreparedRecordingFrame",
     "RoiCrop",
     "SAMPLE_IMAGE_KEYS",
+    "WorkerClient",
+    "WorkerClientError",
     "crop_normalized_roi",
     "dataset_features",
     "normalized_roi_bounds",
