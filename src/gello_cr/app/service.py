@@ -1,8 +1,9 @@
+
 """Application command/event/state orchestration.
 
-This module is intentionally UI-framework agnostic.  Qt/PySide should issue
-commands to ApplicationService and subscribe to AppEvent objects instead of
-directly calling robot/teleop/recorder SDK objects.
+Normal command handlers execute outside the state lock. This allows
+REPORT_FAULT / EMERGENCY_STOP to preempt a long-running lifecycle/recording
+handler while preserving one-at-a-time normal command execution.
 """
 
 from __future__ import annotations
@@ -25,15 +26,16 @@ from .events import AppEvent, EventLevel
 CommandHandler = Callable[[Mapping[str, Any]], Any]
 EventSubscriber = Callable[[AppEvent], None]
 
-# Safety commands enter their safe state before any best-effort hardware
-# handler.  A handler failure must never put the application back into an
-# active motion state.
 _PRETRANSITION_COMMANDS = frozenset(
     {
         Command.REPORT_FAULT,
         Command.EMERGENCY_STOP,
     }
 )
+
+
+class CommandSuperseded(RuntimeError):
+    """A normal handler finished after a safety transition had taken priority."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,15 +57,14 @@ class ApplicationSnapshot:
 class ApplicationService:
     """Single application-layer command dispatcher.
 
-    Normal command:
-        validate -> handler -> state transition
+    Normal commands are serialized by ``_normal_dispatch_lock`` but their
+    handlers run without holding ``_lock``. Safety commands therefore remain
+    able to pretransition the workflow while an opaque lifecycle/recording
+    operation is still in progress.
 
-    REPORT_FAULT / EMERGENCY_STOP:
-        validate -> safe state transition -> best-effort handler
-
-    This ordering gives two useful guarantees:
-    - failed start/save/reset operations do not falsely advance UI state;
-    - a failed emergency-stop handler cannot restore an active state.
+    If a normal handler later returns after FAULT/ESTOP took priority, its
+    original workflow transition is suppressed and the active safety handler is
+    reasserted once.
     """
 
     def __init__(
@@ -76,6 +77,7 @@ class ApplicationService:
         self._handlers: dict[Command, CommandHandler] = dict(handlers or {})
         self._subscribers: list[EventSubscriber] = []
         self._lock = threading.RLock()
+        self._normal_dispatch_lock = threading.Lock()
         self._event_sequence = 0
         self._last_error = ""
 
@@ -131,29 +133,119 @@ class ApplicationService:
     ) -> CommandResult:
         data = MappingProxyType(dict(payload or {}))
 
+        if command in _PRETRANSITION_COMMANDS:
+            return self._dispatch_safety(command, data)
+
+        with self._normal_dispatch_lock:
+            return self._dispatch_normal(command, data)
+
+    def _dispatch_safety(
+        self,
+        command: Command,
+        data: Mapping[str, Any],
+    ) -> CommandResult:
         with self._lock:
             previous_state = self._state_machine.state
-            if not self._state_machine.can(command):
+            self._validate_locked(command, data)
+            handler = self._handlers.get(command)
+            new_state = self._state_machine.apply(command)
+            self._last_error = ""
+            self._emit_locked(
+                kind="state_changed",
+                level=EventLevel.WARNING,
+                message=(
+                    f"{previous_state.name} -> {new_state.name} "
+                    f"by {command.name}"
+                ),
+                command=command,
+                details=data,
+            )
+
+        try:
+            value = handler(data) if handler is not None else None
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                self._emit_locked(
+                    kind="command_failed",
+                    level=EventLevel.ERROR,
+                    message=self._last_error,
+                    command=command,
+                    details=data,
+                )
+            raise
+
+        with self._lock:
+            current_state = self._state_machine.state
+            self._emit_locked(
+                kind="command_completed",
+                level=EventLevel.INFO,
+                message=f"{command.name} completed",
+                command=command,
+                details=data,
+            )
+            return CommandResult(
+                command=command,
+                previous_state=previous_state,
+                state=current_state,
+                value=value,
+            )
+
+    def _dispatch_normal(
+        self,
+        command: Command,
+        data: Mapping[str, Any],
+    ) -> CommandResult:
+        with self._lock:
+            previous_state = self._state_machine.state
+            self._validate_locked(command, data)
+            handler = self._handlers.get(command)
+
+        try:
+            value = handler(data) if handler is not None else None
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                self._emit_locked(
+                    kind="command_failed",
+                    level=EventLevel.ERROR,
+                    message=self._last_error,
+                    command=command,
+                    details=data,
+                )
+            raise
+
+        safety_reassert: tuple[
+            Command,
+            CommandHandler,
+            Mapping[str, Any],
+        ] | None = None
+
+        with self._lock:
+            current_state = self._state_machine.state
+            if current_state is not previous_state:
                 message = (
-                    f"{command.name} is not allowed from "
-                    f"{previous_state.name}"
+                    f"{command.name} handler completed after workflow changed "
+                    f"{previous_state.name} -> {current_state.name}; "
+                    "normal transition suppressed"
                 )
                 self._emit_locked(
-                    kind="command_rejected",
+                    kind="command_superseded",
                     level=EventLevel.WARNING,
                     message=message,
                     command=command,
                     details=data,
                 )
-                raise InvalidTransition(message)
-
-            handler = self._handlers.get(command)
-
-            if command in _PRETRANSITION_COMMANDS:
+                safety_reassert = self._safety_reassert_locked(
+                    current_state,
+                    superseded_command=command,
+                )
+            else:
                 new_state = self._state_machine.apply(command)
+                self._last_error = ""
                 self._emit_locked(
                     kind="state_changed",
-                    level=EventLevel.WARNING,
+                    level=EventLevel.INFO,
                     message=(
                         f"{previous_state.name} -> {new_state.name} "
                         f"by {command.name}"
@@ -161,21 +253,6 @@ class ApplicationService:
                     command=command,
                     details=data,
                 )
-
-                try:
-                    value = handler(data) if handler is not None else None
-                except Exception as exc:
-                    self._last_error = f"{type(exc).__name__}: {exc}"
-                    self._emit_locked(
-                        kind="command_failed",
-                        level=EventLevel.ERROR,
-                        message=self._last_error,
-                        command=command,
-                        details=data,
-                    )
-                    raise
-
-                self._last_error = ""
                 self._emit_locked(
                     kind="command_completed",
                     level=EventLevel.INFO,
@@ -190,58 +267,93 @@ class ApplicationService:
                     value=value,
                 )
 
+        if safety_reassert is not None:
+            safety_command, safety_handler, safety_payload = safety_reassert
             try:
-                value = handler(data) if handler is not None else None
+                safety_handler(safety_payload)
             except Exception as exc:
-                self._last_error = f"{type(exc).__name__}: {exc}"
-                self._emit_locked(
-                    kind="command_failed",
-                    level=EventLevel.ERROR,
-                    message=self._last_error,
-                    command=command,
-                    details=data,
-                )
-                raise
+                with self._lock:
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                    self._emit_locked(
+                        kind="safety_reassert_failed",
+                        level=EventLevel.ERROR,
+                        message=self._last_error,
+                        command=safety_command,
+                        details=safety_payload,
+                    )
+            else:
+                with self._lock:
+                    self._emit_locked(
+                        kind="safety_reasserted",
+                        level=EventLevel.WARNING,
+                        message=(
+                            f"{safety_command.name} reasserted after "
+                            f"{command.name} completed late"
+                        ),
+                        command=safety_command,
+                        details=safety_payload,
+                    )
 
-            new_state = self._state_machine.apply(command)
-            self._last_error = ""
-            self._emit_locked(
-                kind="state_changed",
-                level=EventLevel.INFO,
-                message=(
-                    f"{previous_state.name} -> {new_state.name} "
-                    f"by {command.name}"
+        raise CommandSuperseded(
+            f"{command.name} was superseded by {current_state.name}"
+        )
+
+    def _validate_locked(
+        self,
+        command: Command,
+        data: Mapping[str, Any],
+    ) -> None:
+        if self._state_machine.can(command):
+            return
+
+        previous_state = self._state_machine.state
+        message = (
+            f"{command.name} is not allowed from "
+            f"{previous_state.name}"
+        )
+        self._emit_locked(
+            kind="command_rejected",
+            level=EventLevel.WARNING,
+            message=message,
+            command=command,
+            details=data,
+        )
+        raise InvalidTransition(message)
+
+    def _safety_reassert_locked(
+        self,
+        state: WorkflowState,
+        *,
+        superseded_command: Command,
+    ) -> tuple[Command, CommandHandler, Mapping[str, Any]] | None:
+        if state is WorkflowState.ESTOP:
+            command = Command.EMERGENCY_STOP
+        elif state is WorkflowState.FAULT:
+            command = Command.REPORT_FAULT
+        else:
+            return None
+
+        handler = self._handlers.get(command)
+        if handler is None:
+            return None
+
+        payload = MappingProxyType(
+            {
+                "reason": (
+                    f"reassert {state.name} after late "
+                    f"{superseded_command.name} completion"
                 ),
-                command=command,
-                details=data,
-            )
-            self._emit_locked(
-                kind="command_completed",
-                level=EventLevel.INFO,
-                message=f"{command.name} completed",
-                command=command,
-                details=data,
-            )
-            return CommandResult(
-                command=command,
-                previous_state=previous_state,
-                state=new_state,
-                value=value,
-            )
+                "superseded_command": superseded_command.name,
+            }
+        )
+        return command, handler, payload
 
     def report_external_fault(
         self,
         reason: str,
         details: Mapping[str, Any] | None = None,
     ) -> WorkflowState:
-        """Synchronize a fault that the runtime has already handled safely.
-
-        Unlike dispatch(REPORT_FAULT), this deliberately does not invoke the
-        REPORT_FAULT command handler. TeleopEngine has already stopped its
-        command producers and entered its own fault state.
-
-        ESTOP always has priority over an observed runtime fault.
-        """
+        """Synchronize a runtime fault that has already performed safe-stop."""
 
         message = str(reason).strip() or "runtime fault"
         data = MappingProxyType(dict(details or {}))
@@ -316,8 +428,6 @@ class ApplicationService:
         )
         subscribers = tuple(self._subscribers)
 
-        # Subscribers are observers.  One broken UI/log subscriber must not
-        # corrupt command/state processing or block the other observers.
         for subscriber in subscribers:
             try:
                 subscriber(event)

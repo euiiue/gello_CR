@@ -11,6 +11,7 @@ from .service import (
     ApplicationService,
     ApplicationSnapshot,
     CommandResult,
+    CommandSuperseded,
 )
 from .view_model import (
     ApplicationViewModel,
@@ -25,6 +26,7 @@ __all__ = [
     "ApplicationSnapshot",
     "ApplicationViewModel",
     "CommandResult",
+    "CommandSuperseded",
     "EventLevel",
     "RuntimeCommandBindings",
     "RuntimeLifecycleCallbacks",

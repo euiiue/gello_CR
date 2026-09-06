@@ -167,7 +167,19 @@ class OperatorMainWindow(QMainWindow):
         )
 
     def _submit(self, command: Command, payload=None) -> None:
-        self._command_port.submit(CommandRequest.create(command, payload))
+        try:
+            self._command_port.submit(
+                CommandRequest.create(command, payload)
+            )
+        except Exception as exc:
+            self.event_log.appendPlainText(
+                f"LOCAL ERROR · {command.name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self.statusBar().showMessage(
+                f"{command.name} submit failed: {exc}",
+                10000,
+            )
 
     def refresh_from_presenter(self) -> None:
         frame = self._presenter.poll()
@@ -219,5 +231,6 @@ class OperatorMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         self._timer.stop()
+        self._command_port.close(timeout=1.0)
         self._presenter.close()
         super().closeEvent(event)
