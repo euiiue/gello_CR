@@ -1425,7 +1425,11 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             recorder=self.lerobot_recorder,
             lifecycle=RuntimeLifecycleCallbacks(
                 connect=self._app_require_robot_connected,
+                disconnect=self._app_disconnect_robot,
                 power_on=self._app_require_robot_enabled,
+                power_off=self._app_power_off_robot,
+                reset_fault=self._app_reset_fault,
+                reset_estop=self._app_reset_estop,
             ),
         ).install()
         self.app_event_buffer = ApplicationEventBuffer(capacity=256)
@@ -1714,6 +1718,72 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             )
         return servo_state
 
+    def _app_power_off_robot(self):
+        adapter = self._app_require_robot_connected()
+        # Preserve the legacy safety behavior: stop any remaining command
+        # producer before servo power-off. This does not start motion.
+        self.teleop_engine.emergency_stop("下使能前停止当前动作")
+        transition = adapter.power_off()
+        state = int(adapter.servo_state())
+        if state not in (0, 1):
+            raise RuntimeError(
+                f"CR3A 下使能确认失败，当前 servo_state={state}"
+            )
+        self._teleop_event(
+            "info",
+            f"CR3A 已下使能，伺服状态 "
+            f"{transition.initial_state}→{transition.final_state}",
+        )
+        return transition
+
+    def _app_reset_safe_state(self, label):
+        adapter = self._app_require_robot_connected()
+        # NRC power_on already contains the validated alarm-clear sequence.
+        # It ends in servo state 3 but does not start ServoJ.
+        transition = adapter.power_on()
+        state = int(adapter.servo_state())
+        if state != 3:
+            raise RuntimeError(
+                f"{label} 后 CR3A 未进入运行状态，servo_state={state}"
+            )
+        self.teleop_engine.acknowledge_fault()
+        self._teleop_event(
+            "info",
+            f"{label}完成；CR3A 已恢复到运行态，"
+            "主从跟随保持停止，需人工重新启动",
+        )
+        return transition
+
+    def _app_reset_fault(self):
+        return self._app_reset_safe_state("FAULT 复位")
+
+    def _app_reset_estop(self):
+        return self._app_reset_safe_state("ESTOP 复位")
+
+    def _app_disconnect_robot(self):
+        adapter = self.nrc_adapter
+        device = self.cr3a_device
+
+        if adapter is not None:
+            self.teleop_engine.detach_robot(
+                adapter,
+                "ApplicationService 断开 CR3A",
+            )
+
+        if device is not None:
+            device.close()
+
+        self.cr3a_device = None
+        self.nrc_adapter = None
+        self.socketFd = -1
+        self.socketFd_7000 = -1
+        self.robot1_connected = False
+        self._teleop_event(
+            "info",
+            "CR3A 6001/7000 已断开；不会自动重新连接或启动跟随",
+        )
+        return True
+
     def _app_confirm_connected(self):
         if self.app_service.state is WorkflowState.OFFLINE:
             self.app_service.dispatch(Command.CONNECT)
@@ -1743,6 +1813,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         for name in (
             "gello_page_connect_robot",
             "teleop_connect_robot_button",
+            "pushButtonCONNECT",
         ):
             self._gate_widget_enabled(
                 getattr(self, name, None),
@@ -1752,6 +1823,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         for name in (
             "gello_page_power_on",
             "teleop_power_on_button",
+            "pushButtonON",
         ):
             self._gate_widget_enabled(
                 getattr(self, name, None),
@@ -1761,6 +1833,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         for name in (
             "gello_page_start",
             "teleop_start_button",
+            "pushButtonFollowStart",
         ):
             self._gate_widget_enabled(
                 getattr(self, name, None),
@@ -1770,11 +1843,21 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         for name in (
             "gello_page_estop",
             "teleop_estop_button",
+            "pushButtonRobotStop",
         ):
             self._gate_widget_enabled(
                 getattr(self, name, None),
                 policy.emergency_stop,
             )
+
+        self._gate_widget_enabled(
+            getattr(self, "pushButtonOFF", None),
+            policy.power_off,
+        )
+        self._gate_widget_enabled(
+            getattr(self, "pushButtonCLEARERROR", None),
+            policy.power_on or policy.reset_fault or policy.reset_estop,
+        )
 
         self._gate_widget_enabled(
             getattr(self, "lerobot_start_button", None),
@@ -4184,21 +4267,34 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
     def RobotPowerON(self):
         self.WorkflowPowerOn()
 
-    def RobotPowerOFF(self):
-        def power_off():
-            if self.nrc_adapter is None:
-                raise RuntimeError("CR5 未连接")
-            self.teleop_engine.emergency_stop("下使能前停止遥操")
-            transition = self.nrc_adapter.power_off()
-            self._teleop_event(
-                "info",
-                f"CR5 已下使能（{transition.initial_state}→{transition.final_state}）",
-            )
+    def RobotDISCONNECT(self):
+        self._run_teleop_async(
+            "断开 CR3A",
+            lambda: self.app_service.dispatch(Command.DISCONNECT),
+        )
 
-        self._run_teleop_async("CR5 下使能", power_off)
+    def RobotPowerOFF(self):
+        self._run_teleop_async(
+            "CR3A 下使能",
+            lambda: self.app_service.dispatch(Command.POWER_OFF),
+        )
 
     def RobotClearError(self):
-        self.WorkflowPowerOn()
+        def reset_or_power_on():
+            state = self.app_service.state
+            if state is WorkflowState.FAULT:
+                return self.app_service.dispatch(Command.RESET_FAULT)
+            if state is WorkflowState.ESTOP:
+                return self.app_service.dispatch(Command.RESET_ESTOP)
+            if state is WorkflowState.CONNECTED:
+                # Preserve the historical "clear error" behavior: NRC
+                # power_on clears servo alarm if present and ends in state 3.
+                return self.app_service.dispatch(Command.POWER_ON)
+            raise RuntimeError(
+                f"当前 Application 状态 {state.name} 不需要清错/复位"
+            )
+
+        self._run_teleop_async("CR3A 清错/复位", reset_or_power_on)
 
     def RobotTrackStart(self):
         self.TeleopFollowStart()

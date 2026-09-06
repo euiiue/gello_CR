@@ -4223,6 +4223,26 @@ class TeleopEngine:
             except Exception:
                 pass
 
+    def acknowledge_fault(self) -> None:
+        """Clear the local runtime fault latch after hardware recovery.
+
+        This method sends no robot/hand/master command. The caller must first
+        verify that the underlying hardware recovery/reset has succeeded.
+        """
+        with self._state_lock:
+            if self._state == "closed":
+                raise RuntimeError("遥操作引擎已经关闭")
+            if self._state not in ("fault", "idle"):
+                raise RuntimeError(
+                    f"当前运行态 {self._state} 不允许确认故障恢复"
+                )
+            self._state = "idle"
+            self._last_error = ""
+        self._event(
+            "info",
+            "运行时故障已确认清除；保持 idle，不会自动恢复主从跟随",
+        )
+
     def emergency_stop(self, reason: str = "软件紧急停止") -> None:
         """Stop commanded motion; this does not replace the cabinet E-stop."""
         with self._state_lock:
