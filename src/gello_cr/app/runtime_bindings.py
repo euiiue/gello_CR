@@ -61,6 +61,7 @@ class RuntimeCommandBindings:
             Command.START_TELEOP: self._start_teleop,
             Command.STOP_TELEOP: self._stop_teleop,
             Command.START_EPISODE: self._start_episode,
+            Command.STOP_EPISODE: self._stop_episode,
             Command.SAVE_SUCCESS: self._save_success,
             Command.SAVE_FAILURE: self._save_failure,
             Command.DISCARD_EPISODE: self._discard_episode,
@@ -138,6 +139,9 @@ class RuntimeCommandBindings:
             base_root,
             metadata=dict(metadata or {}),
         )
+
+    def _stop_episode(self, _payload: Mapping[str, Any]) -> Any:
+        return self.recorder.stop_episode()
 
     def _save_success(self, payload: Mapping[str, Any]) -> Any:
         return self.recorder.save_episode(

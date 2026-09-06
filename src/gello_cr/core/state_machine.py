@@ -24,6 +24,7 @@ class Command(Enum):
     START_TELEOP = auto()
     STOP_TELEOP = auto()
     START_EPISODE = auto()
+    STOP_EPISODE = auto()
     SAVE_SUCCESS = auto()
     SAVE_FAILURE = auto()
     DISCARD_EPISODE = auto()
@@ -46,6 +47,7 @@ _NORMAL_TRANSITIONS: dict[tuple[WorkflowState, Command], WorkflowState] = {
     (WorkflowState.ROBOT_ENABLED, Command.START_TELEOP): WorkflowState.TELEOP_RUNNING,
     (WorkflowState.TELEOP_RUNNING, Command.STOP_TELEOP): WorkflowState.ROBOT_ENABLED,
     (WorkflowState.TELEOP_RUNNING, Command.START_EPISODE): WorkflowState.RECORDING,
+    (WorkflowState.RECORDING, Command.STOP_EPISODE): WorkflowState.RECORDING,
     (WorkflowState.RECORDING, Command.SAVE_SUCCESS): WorkflowState.TELEOP_RUNNING,
     (WorkflowState.RECORDING, Command.SAVE_FAILURE): WorkflowState.TELEOP_RUNNING,
     (WorkflowState.RECORDING, Command.DISCARD_EPISODE): WorkflowState.TELEOP_RUNNING,
