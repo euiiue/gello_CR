@@ -1,5 +1,6 @@
 """Recording/data-contract helpers."""
 
+from .episode_recorder import LeRobotEpisodeRecorder
 from .frame import (
     PreparedRecordingFrame,
     prepare_recording_frame,
@@ -24,6 +25,7 @@ from .worker_service import WorkerDatasetService, run_worker
 
 __all__ = [
     "LEROBOT_IMAGE_FEATURE_KEYS",
+    "LeRobotEpisodeRecorder",
     "MAX_HEADER_SIZE",
     "MAX_RAW_SIZE",
     "PreparedRecordingFrame",
