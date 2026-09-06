@@ -28,6 +28,11 @@ import numpy as np
 # V2 package compatibility during the staged migration. The legacy application
 # is still launched from the repository root, while new code uses a src layout.
 try:
+    from gello_cr.control.hand_mapping import (
+        binary_o6_action,
+        interpolate_o6_target,
+        should_send_o6_target,
+    )
     from gello_cr.control.joint_mapping import RelativeJointMapper
     from gello_cr.control.joint_safety import (
         LeaderSpeedViolationCounter,
@@ -43,6 +48,11 @@ except ModuleNotFoundError as exc:
     _V2_SRC_DIR = Path(__file__).resolve().parent / "src"
     if str(_V2_SRC_DIR) not in sys.path:
         sys.path.insert(0, str(_V2_SRC_DIR))
+    from gello_cr.control.hand_mapping import (
+        binary_o6_action,
+        interpolate_o6_target,
+        should_send_o6_target,
+    )
     from gello_cr.control.joint_mapping import RelativeJointMapper
     from gello_cr.control.joint_safety import (
         LeaderSpeedViolationCounter,
@@ -2552,7 +2562,7 @@ class TeleopEngine:
                         "提交不等于执行确认",
                     )
 
-                hand_action = "抓取" if float(master.gripper) >= 0.5 else "张开手"
+                hand_action = binary_o6_action(master.gripper)
                 if last_hand_action != hand_action:
                     self.o6.set_target(o6_cfg["actions"][hand_action])
                     last_hand_action = hand_action
@@ -2636,7 +2646,7 @@ class TeleopEngine:
         next_cycle = time.monotonic()
         last_cycle_time = next_cycle
         startup_settle_deadline = next_cycle + float(gello_cfg.get("startup_settle_s", 0.5))
-        last_hand: Optional[list[int]] = None
+        last_hand: Optional[tuple[int, ...]] = None
         error = ""
         try:
             while not self._follow_stop.is_set():
@@ -2893,24 +2903,15 @@ class TeleopEngine:
                     last_j6_target_rad = desired_j6_rad
                 self._set_dataset_target_tcp(target_tcp.tolist())
 
-                fraction = max(0.0, min(1.0, float(master.gripper)))
-                hand_target = [
-                    int(
-                        round(
-                            float(o6_cfg["open"][index])
-                            + fraction
-                            * (
-                                float(o6_cfg["closed"][index])
-                                - float(o6_cfg["open"][index])
-                            )
-                        )
-                    )
-                    for index in range(6)
-                ]
-                if (
-                    last_hand is None
-                    or max(abs(a - b) for a, b in zip(hand_target, last_hand))
-                    >= int(o6_cfg["command_deadband"])
+                hand_target = interpolate_o6_target(
+                    master.gripper,
+                    o6_cfg["open"],
+                    o6_cfg["closed"],
+                )
+                if should_send_o6_target(
+                    hand_target,
+                    last_hand,
+                    int(o6_cfg["command_deadband"]),
                 ):
                     self.o6.set_target(hand_target)
                     last_hand = hand_target
