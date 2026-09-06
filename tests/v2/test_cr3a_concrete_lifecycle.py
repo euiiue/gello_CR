@@ -1,0 +1,132 @@
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from gello_cr.bootstrap.runtime_factory import Cr3aLifecycle, RuntimeFactoryPaths
+
+
+class Session:
+    def __init__(self):
+        self.state = 1
+        self.calls = []
+    def power_on(self):
+        self.calls.append('power_on')
+        self.state = 3
+        return 'on'
+    def power_off(self):
+        self.calls.append('power_off')
+        self.state = 1
+        return 'off'
+    def servo_state(self): return self.state
+
+
+class Device:
+    instances = []
+    def __init__(self, config, event_callback=None):
+        self.config = config
+        self.event_callback = event_callback
+        self.connected = False
+        self.session = Session()
+        self.closed = 0
+        Device.instances.append(self)
+    def connect(self, timeout=10.0):
+        self.connected = True
+        return object()
+    def close(self):
+        self.closed += 1
+        self.connected = False
+
+
+class Store:
+    data = {
+        'robot': {
+            'ip': '192.168.1.245', 'command_port': 6001,
+            'servo_port': 7000, 'robot_num': 1,
+            'movej_velocity': 10.0, 'movej_acc': 20.0,
+            'movej_dec': 20.0, 'movej_period_s': 0.1,
+            'movej_low_latency': False,
+            'servoj_vmax': 80.0, 'servoj_amax': 200.0,
+            'servoj_jmax': 150.0,
+        }
+    }
+
+
+class Engine:
+    def __init__(self):
+        self.attached = []
+        self.detached = []
+        self.estops = []
+        self.acks = 0
+    def attach_robot(self, session): self.attached.append(session)
+    def detach_robot(self, session, reason):
+        self.detached.append((session, reason)); return True
+    def emergency_stop(self, reason): self.estops.append(reason)
+    def acknowledge_fault(self): self.acks += 1
+
+
+def lifecycle(tmp_path):
+    return Cr3aLifecycle(
+        store=Store(),
+        teleop_engine=Engine(),
+        paths=RuntimeFactoryPaths(
+            repo_root=tmp_path,
+            config_path=tmp_path/'config.json',
+            linker_hand_sdk_root=tmp_path/'hand',
+            nrc_sdk_root=None,
+        ),
+        device_constructor=Device,
+    )
+
+
+def test_lifecycle_construction_is_disconnected(tmp_path) -> None:
+    Device.instances.clear()
+    life = lifecycle(tmp_path)
+    assert life.device is None
+    assert life.session is None
+    assert Device.instances == []
+
+
+def test_connect_creates_device_only_on_explicit_callback(tmp_path) -> None:
+    Device.instances.clear()
+    life = lifecycle(tmp_path)
+    session = life.connect()
+
+    assert len(Device.instances) == 1
+    assert life.session is session
+    assert life._teleop_engine.attached == [session]
+
+
+def test_power_on_and_off_use_existing_session(tmp_path) -> None:
+    life = lifecycle(tmp_path)
+    session = life.connect()
+
+    assert life.power_on() == 'on'
+    assert session.state == 3
+    assert life.power_off() == 'off'
+    assert session.state == 1
+    assert life._teleop_engine.estops == ['下使能前停止当前动作']
+
+
+def test_reset_acknowledges_runtime_but_never_starts_follow(tmp_path) -> None:
+    life = lifecycle(tmp_path)
+    session = life.connect()
+    session.state = 2
+
+    life.reset_fault()
+
+    assert session.state == 3
+    assert life._teleop_engine.acks == 1
+    assert not hasattr(life._teleop_engine, 'start_follow_called')
+
+
+def test_disconnect_detaches_then_closes_and_clears_refs(tmp_path) -> None:
+    life = lifecycle(tmp_path)
+    session = life.connect()
+    device = life.device
+
+    assert life.disconnect()
+    assert life._teleop_engine.detached
+    assert device.closed >= 1
+    assert life.device is None
+    assert life.session is None
