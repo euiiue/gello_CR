@@ -1,3 +1,4 @@
+
 """Single workflow state machine for the V2 operator application."""
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ class WorkflowState(Enum):
 class Command(Enum):
     CONNECT = auto()
     DISCONNECT = auto()
+    PREPARE_DEVICES = auto()
+    START_CAMERAS = auto()
+    STOP_CAMERAS = auto()
     POWER_ON = auto()
     POWER_OFF = auto()
     START_TELEOP = auto()
@@ -40,17 +44,82 @@ class InvalidTransition(RuntimeError):
 
 _NORMAL_TRANSITIONS: dict[tuple[WorkflowState, Command], WorkflowState] = {
     (WorkflowState.OFFLINE, Command.CONNECT): WorkflowState.CONNECTED,
+
+    # Auxiliary preparation never changes the robot workflow state.
+    (WorkflowState.CONNECTED, Command.PREPARE_DEVICES): WorkflowState.CONNECTED,
+    (
+        WorkflowState.ROBOT_ENABLED,
+        Command.PREPARE_DEVICES,
+    ): WorkflowState.ROBOT_ENABLED,
+
+    (WorkflowState.OFFLINE, Command.START_CAMERAS): WorkflowState.OFFLINE,
+    (
+        WorkflowState.CONNECTED,
+        Command.START_CAMERAS,
+    ): WorkflowState.CONNECTED,
+    (
+        WorkflowState.ROBOT_ENABLED,
+        Command.START_CAMERAS,
+    ): WorkflowState.ROBOT_ENABLED,
+    (
+        WorkflowState.TELEOP_RUNNING,
+        Command.START_CAMERAS,
+    ): WorkflowState.TELEOP_RUNNING,
+
+    # Camera stop is safe as a workflow self-transition. The concrete handler
+    # additionally refuses to stop while an Episode is active or pending save.
+    (WorkflowState.OFFLINE, Command.STOP_CAMERAS): WorkflowState.OFFLINE,
+    (
+        WorkflowState.CONNECTED,
+        Command.STOP_CAMERAS,
+    ): WorkflowState.CONNECTED,
+    (
+        WorkflowState.ROBOT_ENABLED,
+        Command.STOP_CAMERAS,
+    ): WorkflowState.ROBOT_ENABLED,
+    (
+        WorkflowState.TELEOP_RUNNING,
+        Command.STOP_CAMERAS,
+    ): WorkflowState.TELEOP_RUNNING,
+    (
+        WorkflowState.RECORDING,
+        Command.STOP_CAMERAS,
+    ): WorkflowState.RECORDING,
+    (WorkflowState.FAULT, Command.STOP_CAMERAS): WorkflowState.FAULT,
+    (WorkflowState.ESTOP, Command.STOP_CAMERAS): WorkflowState.ESTOP,
+
     (WorkflowState.CONNECTED, Command.DISCONNECT): WorkflowState.OFFLINE,
     (WorkflowState.CONNECTED, Command.POWER_ON): WorkflowState.ROBOT_ENABLED,
     (WorkflowState.ROBOT_ENABLED, Command.POWER_OFF): WorkflowState.CONNECTED,
     (WorkflowState.ROBOT_ENABLED, Command.DISCONNECT): WorkflowState.OFFLINE,
-    (WorkflowState.ROBOT_ENABLED, Command.START_TELEOP): WorkflowState.TELEOP_RUNNING,
-    (WorkflowState.TELEOP_RUNNING, Command.STOP_TELEOP): WorkflowState.ROBOT_ENABLED,
-    (WorkflowState.TELEOP_RUNNING, Command.START_EPISODE): WorkflowState.RECORDING,
-    (WorkflowState.RECORDING, Command.STOP_EPISODE): WorkflowState.RECORDING,
-    (WorkflowState.RECORDING, Command.SAVE_SUCCESS): WorkflowState.TELEOP_RUNNING,
-    (WorkflowState.RECORDING, Command.SAVE_FAILURE): WorkflowState.TELEOP_RUNNING,
-    (WorkflowState.RECORDING, Command.DISCARD_EPISODE): WorkflowState.TELEOP_RUNNING,
+    (
+        WorkflowState.ROBOT_ENABLED,
+        Command.START_TELEOP,
+    ): WorkflowState.TELEOP_RUNNING,
+    (
+        WorkflowState.TELEOP_RUNNING,
+        Command.STOP_TELEOP,
+    ): WorkflowState.ROBOT_ENABLED,
+    (
+        WorkflowState.TELEOP_RUNNING,
+        Command.START_EPISODE,
+    ): WorkflowState.RECORDING,
+    (
+        WorkflowState.RECORDING,
+        Command.STOP_EPISODE,
+    ): WorkflowState.RECORDING,
+    (
+        WorkflowState.RECORDING,
+        Command.SAVE_SUCCESS,
+    ): WorkflowState.TELEOP_RUNNING,
+    (
+        WorkflowState.RECORDING,
+        Command.SAVE_FAILURE,
+    ): WorkflowState.TELEOP_RUNNING,
+    (
+        WorkflowState.RECORDING,
+        Command.DISCARD_EPISODE,
+    ): WorkflowState.TELEOP_RUNNING,
 }
 
 
@@ -63,14 +132,21 @@ class WorkflowStateMachine:
         if command is Command.EMERGENCY_STOP:
             return self.state is not WorkflowState.ESTOP
         if command is Command.REPORT_FAULT:
-            return self.state not in (WorkflowState.FAULT, WorkflowState.ESTOP)
+            return self.state not in (
+                WorkflowState.FAULT,
+                WorkflowState.ESTOP,
+            )
         if command is Command.RESET_FAULT:
             return self.state is WorkflowState.FAULT
         if command is Command.RESET_ESTOP:
             return self.state is WorkflowState.ESTOP
         if (
-            self.state in (WorkflowState.FAULT, WorkflowState.ESTOP)
-            and command in (
+            self.state in (
+                WorkflowState.FAULT,
+                WorkflowState.ESTOP,
+            )
+            and command
+            in (
                 Command.SAVE_FAILURE,
                 Command.DISCARD_EPISODE,
             )
@@ -80,7 +156,9 @@ class WorkflowStateMachine:
 
     def apply(self, command: Command) -> WorkflowState:
         if not self.can(command):
-            raise InvalidTransition(f"{command.name} is not allowed from {self.state.name}")
+            raise InvalidTransition(
+                f"{command.name} is not allowed from {self.state.name}"
+            )
 
         if command is Command.EMERGENCY_STOP:
             self.recovery_state = self._safe_recovery_state(self.state)
@@ -92,13 +170,21 @@ class WorkflowStateMachine:
             self.state = WorkflowState.FAULT
             return self.state
 
-        if command in (Command.RESET_FAULT, Command.RESET_ESTOP):
+        if command in (
+            Command.RESET_FAULT,
+            Command.RESET_ESTOP,
+        ):
             self.state = self.recovery_state
             return self.state
 
         if (
-            self.state in (WorkflowState.FAULT, WorkflowState.ESTOP)
-            and command in (
+            self.state
+            in (
+                WorkflowState.FAULT,
+                WorkflowState.ESTOP,
+            )
+            and command
+            in (
                 Command.SAVE_FAILURE,
                 Command.DISCARD_EPISODE,
             )
@@ -109,8 +195,13 @@ class WorkflowStateMachine:
         return self.state
 
     @staticmethod
-    def _safe_recovery_state(previous: WorkflowState) -> WorkflowState:
-        if previous in (WorkflowState.RECORDING, WorkflowState.TELEOP_RUNNING):
+    def _safe_recovery_state(
+        previous: WorkflowState,
+    ) -> WorkflowState:
+        if previous in (
+            WorkflowState.RECORDING,
+            WorkflowState.TELEOP_RUNNING,
+        ):
             return WorkflowState.ROBOT_ENABLED
         if previous is WorkflowState.ROBOT_ENABLED:
             return WorkflowState.ROBOT_ENABLED

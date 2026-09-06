@@ -1,14 +1,9 @@
 
-"""Composition boundary between the application layer and existing runtime objects.
-
-Phase 6.3 deliberately accepts already-constructed runtime objects.  Constructing
-an OperatorBackend does not connect CR3A, GELLO, O6, RealSense, power the robot,
-start teleoperation, or create a LeRobot dataset session.
-"""
+"""Composition boundary between the application layer and runtime objects."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -21,6 +16,8 @@ from gello_cr.core.state_machine import WorkflowState
 
 from .command_port import AsyncApplicationCommandPort
 from .presenter import OperatorUiPresenter
+
+SnapshotSource = Callable[[], Mapping[str, Any]]
 
 
 class SnapshotRuntime(Protocol):
@@ -46,7 +43,9 @@ class RuntimeFaultSnapshotBridge:
 
     def snapshot(self) -> Mapping[str, Any]:
         snapshot = dict(self._runtime.snapshot())
-        runtime_state = str(snapshot.get("state", "")).strip().lower()
+        runtime_state = str(
+            snapshot.get("state", "")
+        ).strip().lower()
 
         if (
             runtime_state == "fault"
@@ -70,15 +69,6 @@ class RuntimeFaultSnapshotBridge:
 
 @dataclass(slots=True)
 class OperatorBackend:
-    """Application/UI plumbing around existing runtime and recorder objects.
-
-    Ownership is intentionally narrow:
-    - owns ApplicationService, bindings, command port and presenter;
-    - does NOT own or automatically close/power-off the injected hardware
-      runtime/recorder;
-    - close() only stops UI/application plumbing.
-    """
-
     service: ApplicationService
     bindings: RuntimeCommandBindings
     command_port: AsyncApplicationCommandPort
@@ -94,6 +84,7 @@ class OperatorBackend:
         teleop_engine: Any,
         recorder: Any,
         lifecycle: RuntimeLifecycleCallbacks,
+        readiness_snapshot: SnapshotSource | None = None,
         event_capacity: int = 256,
         normal_command_capacity: int = 32,
         safety_command_capacity: int = 8,
@@ -119,6 +110,7 @@ class OperatorBackend:
             service,
             runtime_snapshot=runtime_fault_bridge.snapshot,
             recorder_snapshot=recorder.snapshot,
+            readiness_snapshot=readiness_snapshot,
             event_capacity=event_capacity,
         )
         command_port = AsyncApplicationCommandPort(
@@ -138,7 +130,5 @@ class OperatorBackend:
         )
 
     def close(self, timeout: float = 1.0) -> None:
-        """Close application/UI plumbing only; never power or move hardware."""
-
         self.command_port.close(timeout=timeout)
         self.presenter.close()

@@ -1,9 +1,5 @@
 
-"""Top-level composition object for the new operator application.
-
-Building the application creates runtime objects and application plumbing only.
-It does not open robot/master/hand/camera hardware and does not start motion.
-"""
+"""Top-level composition object for the new operator application."""
 
 from __future__ import annotations
 
@@ -14,6 +10,10 @@ from typing import Any
 from gello_cr.ui.backend import OperatorBackend
 
 from .camera_service import CameraPollingService
+from .preparation import (
+    OperatorPreparationBindings,
+    OperatorReadinessProvider,
+)
 from .runtime_factory import (
     ConcreteRuntime,
     ConcreteRuntimeFactory,
@@ -26,9 +26,11 @@ class OperatorApplication:
     runtime: ConcreteRuntime
     backend: OperatorBackend
     cameras: CameraPollingService
+    readiness: OperatorReadinessProvider
+    preparation_bindings: OperatorPreparationBindings
 
     def close(self, timeout: float = 1.0) -> None:
-        """Close application plumbing and cameras; no implicit robot power cycle."""
+        """Close UI/application plumbing and cameras; no implicit robot power cycle."""
 
         self.cameras.close()
         self.backend.close(timeout=timeout)
@@ -43,12 +45,6 @@ def build_operator_application(
     runtime_factory = factory or ConcreteRuntimeFactory(paths)
     runtime = runtime_factory.build()
 
-    backend = OperatorBackend.compose(
-        teleop_engine=runtime.teleop_engine,
-        recorder=runtime.recorder,
-        lifecycle=runtime.lifecycle,
-    )
-
     dataset_cfg = runtime.store.data["dataset"]
     cameras = CameraPollingService(
         wrist_camera=runtime.wrist_camera,
@@ -57,9 +53,29 @@ def build_operator_application(
         base_roi_norm=dataset_cfg["base_roi_norm"],
         poll_hz=30.0,
     )
+    readiness = OperatorReadinessProvider(
+        runtime=runtime,
+        cameras=cameras,
+    )
+
+    backend = OperatorBackend.compose(
+        teleop_engine=runtime.teleop_engine,
+        recorder=runtime.recorder,
+        lifecycle=runtime.lifecycle,
+        readiness_snapshot=readiness.snapshot,
+    )
+
+    preparation_bindings = OperatorPreparationBindings(
+        backend.service,
+        teleop_engine=runtime.teleop_engine,
+        recorder=runtime.recorder,
+        cameras=cameras,
+    ).install()
 
     return OperatorApplication(
         runtime=runtime,
         backend=backend,
         cameras=cameras,
+        readiness=readiness,
+        preparation_bindings=preparation_bindings,
     )

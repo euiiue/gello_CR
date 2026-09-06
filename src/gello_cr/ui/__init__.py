@@ -15,6 +15,7 @@ from .command_port import (
     CommandRequest,
 )
 from .presenter import OperatorUiPresenter, UiFrame
+from .readiness import OperatorReadiness
 from .session import create_operator_window
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "CommandQueueFull",
     "CommandRequest",
     "OperatorBackend",
+    "OperatorReadiness",
     "OperatorUiPresenter",
     "RuntimeFaultSnapshotBridge",
     "UiFrame",
