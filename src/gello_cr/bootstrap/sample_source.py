@@ -9,12 +9,19 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def _copy_image(image: Any) -> Any:
+    if image is None:
+        return None
+    copier = getattr(image, "copy", None)
+    return copier() if callable(copier) else image
+
+
 class RecordingSampleSource:
     """Combine TeleopEngine dataset state with the latest three RGB streams.
 
-    The source owns only references to the latest immutable/replaced frame
-    objects.  Camera devices are updated explicitly by a later camera service;
-    constructing this object performs no hardware I/O.
+    Camera devices update this object through CameraPollingService.  The same
+    thread-safe cache feeds both LeRobot recording and read-only UI previews.
+    Constructing the source performs no hardware I/O.
     """
 
     def __init__(
@@ -58,10 +65,26 @@ class RecordingSampleSource:
             self._base_roi_rgb = None
             self._base_timestamp = 0.0
 
+    def preview_snapshot(self) -> dict[str, Any]:
+        """Return detached RGB copies for UI presentation.
+
+        The recorder's live cache is never exposed directly to Qt.  Copies keep
+        QImage conversion outside the camera/update critical section.
+        """
+
+        with self._lock:
+            return {
+                "wrist_rgb": _copy_image(self._wrist_rgb),
+                "wrist_timestamp": float(self._wrist_timestamp),
+                "base_rgb": _copy_image(self._base_rgb),
+                "roi_rgb": _copy_image(self._base_roi_rgb),
+                "base_timestamp": float(self._base_timestamp),
+            }
+
     def snapshot_ready(self) -> bool:
         cfg = self._dataset_config
-        max_age = float(cfg['camera_max_age_s'])
-        max_skew = float(cfg['camera_max_skew_s'])
+        max_age = float(cfg["camera_max_age_s"])
+        max_skew = float(cfg["camera_max_skew_s"])
         now = time.monotonic()
         with self._lock:
             return (
@@ -70,7 +93,8 @@ class RecordingSampleSource:
                 and self._base_roi_rgb is not None
                 and now - self._wrist_timestamp <= max_age
                 and now - self._base_timestamp <= max_age
-                and abs(self._wrist_timestamp - self._base_timestamp) <= max_skew
+                and abs(self._wrist_timestamp - self._base_timestamp)
+                <= max_skew
             )
 
     def __call__(self) -> dict[str, Any]:
@@ -85,28 +109,32 @@ class RecordingSampleSource:
             base_timestamp = self._base_timestamp
 
         if wrist is None:
-            raise RuntimeError('腕部 D435 尚无 RGB 图像，请先启动 wrist camera')
+            raise RuntimeError(
+                "腕部 D435 尚无 RGB 图像，请先启动 wrist camera"
+            )
         if base is None or roi is None:
-            raise RuntimeError('基座 D435 尚无完整图/ROI 图像，请先启动 base camera')
+            raise RuntimeError(
+                "基座 D435 尚无完整图/ROI 图像，请先启动 base camera"
+            )
 
         now = time.monotonic()
-        max_age = float(cfg['camera_max_age_s'])
-        max_skew = float(cfg['camera_max_skew_s'])
+        max_age = float(cfg["camera_max_age_s"])
+        max_skew = float(cfg["camera_max_skew_s"])
         wrist_age = now - wrist_timestamp
         base_age = now - base_timestamp
         skew = abs(wrist_timestamp - base_timestamp)
 
-        quality = sample.setdefault('quality', {})
+        quality = sample.setdefault("quality", {})
         quality.update(
             {
-                'camera_skew_s': skew,
-                'wrist_age_s': wrist_age,
-                'base_age_s': base_age,
-                'wrist_timestamp': wrist_timestamp,
-                'base_timestamp': base_timestamp,
-                'wrist_age_exceeded': float(wrist_age > max_age),
-                'base_age_exceeded': float(base_age > max_age),
-                'camera_skew_exceeded': float(skew > max_skew),
+                "camera_skew_s": skew,
+                "wrist_age_s": wrist_age,
+                "base_age_s": base_age,
+                "wrist_timestamp": wrist_timestamp,
+                "base_timestamp": base_timestamp,
+                "wrist_age_exceeded": float(wrist_age > max_age),
+                "base_age_exceeded": float(base_age > max_age),
+                "camera_skew_exceeded": float(skew > max_skew),
             }
         )
         sample['image_base_rgb'] = base

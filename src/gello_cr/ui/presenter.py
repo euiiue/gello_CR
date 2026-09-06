@@ -15,6 +15,7 @@ from gello_cr.app import (
     build_application_view_model,
 )
 
+from .preview_model import CameraPreview
 from .readiness import OperatorReadiness
 
 SnapshotSource = Callable[[], Mapping[str, Any]]
@@ -25,6 +26,7 @@ class UiFrame:
     view_model: ApplicationViewModel
     events: tuple[AppEvent, ...]
     readiness: OperatorReadiness = OperatorReadiness()
+    preview: CameraPreview = CameraPreview()
 
 
 class OperatorUiPresenter:
@@ -37,12 +39,14 @@ class OperatorUiPresenter:
         runtime_snapshot: SnapshotSource,
         recorder_snapshot: SnapshotSource,
         readiness_snapshot: SnapshotSource | None = None,
+        preview_snapshot: SnapshotSource | None = None,
         event_capacity: int = 256,
     ) -> None:
         self._service = service
         self._runtime_snapshot = runtime_snapshot
         self._recorder_snapshot = recorder_snapshot
         self._readiness_snapshot = readiness_snapshot
+        self._preview_snapshot = preview_snapshot
         self._events = ApplicationEventBuffer(capacity=event_capacity)
         self._unsubscribe = service.subscribe(self._events.push)
         self._closed = False
@@ -57,10 +61,21 @@ class OperatorUiPresenter:
 
         runtime = dict(self._runtime_snapshot())
         recorder = dict(self._recorder_snapshot())
+
         readiness_source = self._readiness_snapshot
         readiness = OperatorReadiness.from_mapping(
-            readiness_source() if readiness_source is not None else None
+            readiness_source()
+            if readiness_source is not None
+            else None
         )
+
+        preview_source = self._preview_snapshot
+        preview = CameraPreview.from_mapping(
+            preview_source()
+            if preview_source is not None
+            else None
+        )
+
         view_model = build_application_view_model(
             self._service.snapshot(),
             runtime,
@@ -70,6 +85,7 @@ class OperatorUiPresenter:
             view_model=view_model,
             events=self._events.drain(),
             readiness=readiness,
+            preview=preview,
         )
 
     def close(self) -> None:

@@ -30,8 +30,6 @@ class OperatorApplication:
     preparation_bindings: OperatorPreparationBindings
 
     def close(self, timeout: float = 1.0) -> None:
-        """Close UI/application plumbing and cameras; no implicit robot power cycle."""
-
         self.cameras.close()
         self.backend.close(timeout=timeout)
 
@@ -58,11 +56,20 @@ def build_operator_application(
         cameras=cameras,
     )
 
+    preview_snapshot = getattr(
+        runtime.sample_source,
+        "preview_snapshot",
+        None,
+    )
+    if preview_snapshot is None:
+        preview_snapshot = lambda: {}
+
     backend = OperatorBackend.compose(
         teleop_engine=runtime.teleop_engine,
         recorder=runtime.recorder,
         lifecycle=runtime.lifecycle,
         readiness_snapshot=readiness.snapshot,
+        preview_snapshot=preview_snapshot,
     )
 
     preparation_bindings = OperatorPreparationBindings(

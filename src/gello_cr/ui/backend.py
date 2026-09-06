@@ -31,7 +31,7 @@ class SnapshotRecorder(Protocol):
 
 
 class RuntimeFaultSnapshotBridge:
-    """Read TeleopEngine snapshot and synchronize an already-handled fault."""
+    """Read runtime snapshot and synchronize an already-handled fault."""
 
     def __init__(
         self,
@@ -54,12 +54,12 @@ class RuntimeFaultSnapshotBridge:
             reason = str(
                 snapshot.get("last_error")
                 or snapshot.get("error")
-                or "TeleopEngine runtime fault"
+                or "runtime fault"
             ).strip()
             self._service.report_external_fault(
                 reason,
                 {
-                    "runtime": "TeleopEngine",
+                    "runtime": "teleop",
                     "runtime_state": runtime_state,
                 },
             )
@@ -85,6 +85,7 @@ class OperatorBackend:
         recorder: Any,
         lifecycle: RuntimeLifecycleCallbacks,
         readiness_snapshot: SnapshotSource | None = None,
+        preview_snapshot: SnapshotSource | None = None,
         event_capacity: int = 256,
         normal_command_capacity: int = 32,
         safety_command_capacity: int = 8,
@@ -111,6 +112,7 @@ class OperatorBackend:
             runtime_snapshot=runtime_fault_bridge.snapshot,
             recorder_snapshot=recorder.snapshot,
             readiness_snapshot=readiness_snapshot,
+            preview_snapshot=preview_snapshot,
             event_capacity=event_capacity,
         )
         command_port = AsyncApplicationCommandPort(

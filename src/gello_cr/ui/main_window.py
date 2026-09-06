@@ -1,15 +1,14 @@
 
-"""PySide6 operator window.
-
-The window consumes only presentation objects and CommandPort. It does not
-import vendor SDKs, runtime implementations, recorder implementations or device adapters.
-"""
+"""PySide6 operator window using only presentation and command boundaries."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
+import numpy as np
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -27,6 +26,7 @@ from gello_cr.core.state_machine import Command, WorkflowState
 
 from .command_port import CommandPort, CommandRequest
 from .presenter import OperatorUiPresenter
+from .preview_model import CameraPreview
 from .readiness import OperatorReadiness
 
 
@@ -42,108 +42,180 @@ class OperatorMainWindow(QMainWindow):
         super().__init__(parent)
         self._presenter = presenter
         self._command_port = command_port
+        self._last_preview_timestamps = (-1.0, -1.0)
+
         self.setWindowTitle("GELLO · CR3A · O6 Operator")
-        self.resize(1180, 820)
+        self.setMinimumSize(1180, 820)
+        self.resize(1440, 940)
 
         root = QWidget(self)
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        self.workflow_label = QLabel("OFFLINE")
-        self.workflow_detail = QLabel(
-            "正在等待 ApplicationViewModel"
-        )
-        layout.addWidget(self.workflow_label)
-        layout.addWidget(self.workflow_detail)
-
-        layout.addWidget(self._build_workflow_group())
-        layout.addWidget(self._build_preparation_group())
+        layout.addWidget(self._build_header())
+        layout.addWidget(self._build_status_strip())
+        layout.addWidget(self._build_primary_controls())
+        layout.addWidget(self._build_preview_group(), 1)
         layout.addWidget(self._build_episode_group())
+        layout.addWidget(self._build_log_group())
 
-        self.event_log = QPlainTextEdit()
-        self.event_log.setReadOnly(True)
-        self.event_log.setPlaceholderText("Application events")
-        layout.addWidget(self.event_log, 1)
+        self._apply_operator_style()
 
         self._timer = QTimer(self)
         self._timer.setInterval(max(20, int(refresh_ms)))
         self._timer.timeout.connect(self.refresh_from_presenter)
         self._timer.start()
-
         self.refresh_from_presenter()
 
-    def _build_workflow_group(self) -> QGroupBox:
-        group = QGroupBox("机器人工作流")
+    def _build_header(self) -> QWidget:
+        widget = QWidget(self)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        text = QVBoxLayout()
+        self.workflow_label = QLabel("OFFLINE")
+        self.workflow_label.setObjectName("workflowTitle")
+        self.workflow_detail = QLabel("等待应用状态")
+        self.workflow_detail.setObjectName("workflowDetail")
+        text.addWidget(self.workflow_label)
+        text.addWidget(self.workflow_detail)
+        row.addLayout(text, 1)
+
+        self.estop_button = QPushButton("软件紧急停止")
+        self.estop_button.setObjectName("estopButton")
+        self.estop_button.setMinimumSize(230, 64)
+        self.estop_button.clicked.connect(
+            lambda: self._submit(Command.EMERGENCY_STOP)
+        )
+        row.addWidget(self.estop_button)
+        return widget
+
+    def _make_status_card(
+        self,
+        title: str,
+    ) -> tuple[QFrame, QLabel]:
+        frame = QFrame(self)
+        frame.setObjectName("statusCard")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 8)
+        title_label = QLabel(title)
+        title_label.setObjectName("statusCardTitle")
+        value = QLabel("--")
+        value.setObjectName("statusCardValue")
+        layout.addWidget(title_label)
+        layout.addWidget(value)
+        return frame, value
+
+    def _build_status_strip(self) -> QWidget:
+        widget = QWidget(self)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        cr3a_card, self.cr3a_status = self._make_status_card("CR3A")
+        master_card, self.master_status = self._make_status_card("GELLO / Master")
+        o6_card, self.o6_status = self._make_status_card("O6")
+        camera_card, self.camera_status = self._make_status_card("Cameras")
+
+        for card in (
+            cr3a_card,
+            master_card,
+            o6_card,
+            camera_card,
+        ):
+            row.addWidget(card, 1)
+        return widget
+
+    def _build_primary_controls(self) -> QGroupBox:
+        group = QGroupBox("操作流程")
         grid = QGridLayout(group)
 
         self.connect_button = QPushButton("1. 连接 CR3A")
-        self.disconnect_button = QPushButton("断开 CR3A")
+        self.prepare_devices_button = QPushButton("2. 连接 GELLO + O6")
         self.power_on_button = QPushButton("3. CR3A 上使能")
-        self.power_off_button = QPushButton("CR3A 下使能")
         self.start_teleop_button = QPushButton("4. 开始主从跟随")
+
+        self.disconnect_button = QPushButton("断开 CR3A")
+        self.power_off_button = QPushButton("CR3A 下使能")
         self.stop_teleop_button = QPushButton("停止主从跟随")
+        self.start_cameras_button = QPushButton("启动双相机")
+        self.stop_cameras_button = QPushButton("停止双相机")
         self.reset_fault_button = QPushButton("复位 FAULT")
         self.reset_estop_button = QPushButton("复位 ESTOP")
-        self.estop_button = QPushButton("软件紧急停止")
 
-        buttons = (
+        command_buttons = (
             (self.connect_button, Command.CONNECT),
-            (self.disconnect_button, Command.DISCONNECT),
+            (self.prepare_devices_button, Command.PREPARE_DEVICES),
             (self.power_on_button, Command.POWER_ON),
-            (self.power_off_button, Command.POWER_OFF),
             (self.start_teleop_button, Command.START_TELEOP),
+            (self.disconnect_button, Command.DISCONNECT),
+            (self.power_off_button, Command.POWER_OFF),
             (self.stop_teleop_button, Command.STOP_TELEOP),
+            (self.start_cameras_button, Command.START_CAMERAS),
+            (self.stop_cameras_button, Command.STOP_CAMERAS),
             (self.reset_fault_button, Command.RESET_FAULT),
             (self.reset_estop_button, Command.RESET_ESTOP),
-            (self.estop_button, Command.EMERGENCY_STOP),
         )
-        for button, command in buttons:
+        for button, command in command_buttons:
             button.clicked.connect(
                 lambda _checked=False, cmd=command: self._submit(cmd)
             )
 
         grid.addWidget(self.connect_button, 0, 0)
-        grid.addWidget(self.disconnect_button, 0, 1)
+        grid.addWidget(self.prepare_devices_button, 0, 1)
         grid.addWidget(self.power_on_button, 0, 2)
-        grid.addWidget(self.power_off_button, 0, 3)
-        grid.addWidget(self.start_teleop_button, 1, 0, 1, 2)
-        grid.addWidget(self.stop_teleop_button, 1, 2, 1, 2)
-        grid.addWidget(self.reset_fault_button, 2, 0)
-        grid.addWidget(self.reset_estop_button, 2, 1)
-        grid.addWidget(self.estop_button, 2, 2, 1, 2)
+        grid.addWidget(self.start_teleop_button, 0, 3)
+
+        grid.addWidget(self.start_cameras_button, 1, 0)
+        grid.addWidget(self.stop_cameras_button, 1, 1)
+        grid.addWidget(self.stop_teleop_button, 1, 2)
+        grid.addWidget(self.power_off_button, 1, 3)
+
+        grid.addWidget(self.disconnect_button, 2, 0)
+        grid.addWidget(self.reset_fault_button, 2, 1)
+        grid.addWidget(self.reset_estop_button, 2, 2)
         return group
 
-    def _build_preparation_group(self) -> QGroupBox:
-        group = QGroupBox("设备准备")
-        grid = QGridLayout(group)
+    def _make_preview_label(
+        self,
+        title: str,
+    ) -> tuple[QWidget, QLabel]:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        self.prepare_devices_button = QPushButton(
-            "2. 连接 GELLO + O6"
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setObjectName("previewTitle")
+
+        image_label = QLabel("等待相机")
+        image_label.setObjectName("previewImage")
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setMinimumSize(260, 195)
+
+        layout.addWidget(title_label)
+        layout.addWidget(image_label, 1)
+        return container, image_label
+
+    def _build_preview_group(self) -> QGroupBox:
+        group = QGroupBox("RGB Preview")
+        row = QHBoxLayout(group)
+
+        base_widget, self.base_preview = self._make_preview_label(
+            "Base RGB"
         )
-        self.start_cameras_button = QPushButton("启动双相机")
-        self.stop_cameras_button = QPushButton("停止双相机")
-        self.device_status_label = QLabel(
-            "Master: -- | O6: --"
+        wrist_widget, self.wrist_preview = self._make_preview_label(
+            "Wrist RGB"
         )
-        self.camera_status_label = QLabel(
-            "Cameras: stopped"
+        roi_widget, self.roi_preview = self._make_preview_label(
+            "Base ROI"
         )
 
-        self.prepare_devices_button.clicked.connect(
-            lambda: self._submit(Command.PREPARE_DEVICES)
-        )
-        self.start_cameras_button.clicked.connect(
-            lambda: self._submit(Command.START_CAMERAS)
-        )
-        self.stop_cameras_button.clicked.connect(
-            lambda: self._submit(Command.STOP_CAMERAS)
-        )
-
-        grid.addWidget(self.prepare_devices_button, 0, 0)
-        grid.addWidget(self.start_cameras_button, 0, 1)
-        grid.addWidget(self.stop_cameras_button, 0, 2)
-        grid.addWidget(self.device_status_label, 1, 0, 1, 3)
-        grid.addWidget(self.camera_status_label, 2, 0, 1, 3)
+        row.addWidget(base_widget, 1)
+        row.addWidget(wrist_widget, 1)
+        row.addWidget(roi_widget, 1)
         return group
 
     def _build_episode_group(self) -> QGroupBox:
@@ -173,12 +245,10 @@ class OperatorMainWindow(QMainWindow):
             row.addWidget(button)
         outer.addLayout(row)
 
-        self.episode_status = QLabel("0 buffered · 0 saved")
+        self.episode_status = QLabel("未启动数据集")
         outer.addWidget(self.episode_status)
 
-        self.episode_start_button.clicked.connect(
-            self._start_episode
-        )
+        self.episode_start_button.clicked.connect(self._start_episode)
         self.episode_stop_button.clicked.connect(
             lambda: self._submit(Command.STOP_EPISODE)
         )
@@ -192,6 +262,68 @@ class OperatorMainWindow(QMainWindow):
             lambda: self._submit(Command.DISCARD_EPISODE)
         )
         return group
+
+    def _build_log_group(self) -> QGroupBox:
+        group = QGroupBox("Application Events")
+        layout = QVBoxLayout(group)
+        self.event_log = QPlainTextEdit()
+        self.event_log.setReadOnly(True)
+        self.event_log.setMaximumHeight(145)
+        self.event_log.document().setMaximumBlockCount(400)
+        layout.addWidget(self.event_log)
+        return group
+
+    def _apply_operator_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QGroupBox {
+                font-weight: 600;
+                margin-top: 8px;
+                padding-top: 10px;
+            }
+            QPushButton {
+                min-height: 34px;
+                padding: 4px 10px;
+            }
+            QLabel#workflowTitle {
+                font-size: 24px;
+                font-weight: 700;
+            }
+            QLabel#workflowDetail {
+                font-size: 14px;
+            }
+            QFrame#statusCard {
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+            }
+            QLabel#statusCardTitle {
+                font-size: 12px;
+            }
+            QLabel#statusCardValue {
+                font-size: 17px;
+                font-weight: 700;
+            }
+            QPushButton#estopButton {
+                font-size: 18px;
+                font-weight: 800;
+                background: #b3261e;
+                color: white;
+                border-radius: 8px;
+            }
+            QPushButton#estopButton:disabled {
+                background: #8c8c8c;
+                color: #dddddd;
+            }
+            QLabel#previewTitle {
+                font-weight: 600;
+            }
+            QLabel#previewImage {
+                border: 1px solid palette(mid);
+                background: #111111;
+                color: #d0d0d0;
+            }
+            """
+        )
 
     def _start_episode(self) -> None:
         self._submit(
@@ -224,6 +356,7 @@ class OperatorMainWindow(QMainWindow):
             frame.readiness,
             frame.view_model,
         )
+        self.render_preview(frame.preview)
         for event in frame.events:
             self.append_event(event)
 
@@ -256,54 +389,73 @@ class OperatorMainWindow(QMainWindow):
         self.reset_estop_button.setEnabled(policy.reset_estop)
         self.estop_button.setEnabled(policy.emergency_stop)
 
-        self.episode_start_button.setEnabled(
-            policy.start_episode
-        )
-        self.episode_stop_button.setEnabled(
-            policy.stop_episode
-        )
-        self.save_success_button.setEnabled(
-            policy.save_success
-        )
-        self.save_failure_button.setEnabled(
-            policy.save_failure
-        )
-        self.discard_button.setEnabled(
-            policy.discard_episode
-        )
+        self.episode_start_button.setEnabled(policy.start_episode)
+        self.episode_stop_button.setEnabled(policy.stop_episode)
+        self.save_success_button.setEnabled(policy.save_success)
+        self.save_failure_button.setEnabled(policy.save_failure)
+        self.discard_button.setEnabled(policy.discard_episode)
 
-        self.episode_status.setText(
-            f"{view.buffered_frames} buffered · "
-            f"{view.saved_episodes} saved · "
-            f"review="
-            f"{'yes' if view.quality_needs_review else 'no'}"
-        )
+        if (
+            not view.dataset_session_active
+            and not view.episode_active
+            and not view.episode_pending
+            and view.saved_episodes == 0
+        ):
+            episode_text = "未启动数据集"
+        else:
+            episode_text = (
+                f"{view.buffered_frames} buffered · "
+                f"{view.saved_episodes} saved"
+            )
+            if view.quality_needs_review:
+                episode_text += " · NEEDS REVIEW"
+        self.episode_status.setText(episode_text)
 
     def render_readiness(
         self,
         readiness: OperatorReadiness,
         view: ApplicationViewModel,
     ) -> None:
-        self.device_status_label.setText(
+        state = view.workflow_state
+        if state is WorkflowState.OFFLINE:
+            cr3a_text = "offline"
+        elif state is WorkflowState.CONNECTED:
+            cr3a_text = "connected"
+        elif state is WorkflowState.ROBOT_ENABLED:
+            cr3a_text = "enabled"
+        elif state in (
+            WorkflowState.TELEOP_RUNNING,
+            WorkflowState.RECORDING,
+        ):
+            cr3a_text = "active"
+        elif state is WorkflowState.FAULT:
+            cr3a_text = "FAULT"
+        else:
+            cr3a_text = "ESTOP"
+
+        self.cr3a_status.setText(cr3a_text)
+        self.master_status.setText(
             f"{readiness.master_type}: "
             f"{'ready' if readiness.master_connected else 'offline'}"
-            " | O6: "
-            f"{'ready' if readiness.o6_connected else 'offline'}"
+        )
+        self.o6_status.setText(
+            "ready" if readiness.o6_connected else "offline"
         )
 
         if readiness.camera_error:
-            camera_text = (
-                f"Cameras ERROR: {readiness.camera_error}"
-            )
+            camera_text = "ERROR"
+            self.camera_status.setToolTip(readiness.camera_error)
         elif readiness.camera_frames_ready:
-            camera_text = "Cameras: running · frames fresh"
+            camera_text = "fresh"
+            self.camera_status.setToolTip("")
         elif readiness.cameras_running:
-            camera_text = "Cameras: running · waiting fresh frames"
+            camera_text = "starting"
+            self.camera_status.setToolTip("")
         else:
-            camera_text = "Cameras: stopped"
-        self.camera_status_label.setText(camera_text)
+            camera_text = "stopped"
+            self.camera_status.setToolTip("")
+        self.camera_status.setText(camera_text)
 
-        state = view.workflow_state
         prepare_allowed = state in (
             WorkflowState.CONNECTED,
             WorkflowState.ROBOT_ENABLED,
@@ -328,7 +480,6 @@ class OperatorMainWindow(QMainWindow):
             and not view.episode_pending
         )
 
-        # Readiness can only narrow Application workflow permissions.
         self.power_on_button.setEnabled(
             self.power_on_button.isEnabled()
             and readiness.devices_ready
@@ -340,6 +491,76 @@ class OperatorMainWindow(QMainWindow):
         self.episode_start_button.setEnabled(
             self.episode_start_button.isEnabled()
             and readiness.camera_frames_ready
+        )
+
+    @staticmethod
+    def _pixmap_from_rgb(image_rgb) -> QPixmap | None:
+        if image_rgb is None:
+            return None
+
+        image = np.asarray(image_rgb)
+        if (
+            image.ndim != 3
+            or image.shape[2] != 3
+            or image.dtype != np.uint8
+        ):
+            return None
+
+        image = np.ascontiguousarray(image)
+        height, width = image.shape[:2]
+        qimage = QImage(
+            image.data,
+            width,
+            height,
+            int(image.strides[0]),
+            QImage.Format_RGB888,
+        ).copy()
+        return QPixmap.fromImage(qimage)
+
+    def _set_preview_image(
+        self,
+        label: QLabel,
+        image_rgb,
+        empty_text: str,
+    ) -> None:
+        pixmap = self._pixmap_from_rgb(image_rgb)
+        if pixmap is None:
+            label.clear()
+            label.setText(empty_text)
+            return
+
+        target = label.size()
+        if target.width() > 4 and target.height() > 4:
+            pixmap = pixmap.scaled(
+                target,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        label.setPixmap(pixmap)
+
+    def render_preview(self, preview: CameraPreview) -> None:
+        timestamps = (
+            preview.base_timestamp,
+            preview.wrist_timestamp,
+        )
+        if timestamps == self._last_preview_timestamps:
+            return
+        self._last_preview_timestamps = timestamps
+
+        self._set_preview_image(
+            self.base_preview,
+            preview.base_rgb,
+            "Base RGB · waiting",
+        )
+        self._set_preview_image(
+            self.wrist_preview,
+            preview.wrist_rgb,
+            "Wrist RGB · waiting",
+        )
+        self._set_preview_image(
+            self.roi_preview,
+            preview.roi_rgb,
+            "Base ROI · waiting",
         )
 
     def append_event(self, event: AppEvent) -> None:
