@@ -56,6 +56,7 @@ from gello_cr.app import (
     ApplicationService,
     RuntimeCommandBindings,
     RuntimeLifecycleCallbacks,
+    workflow_ui_policy,
 )
 from gello_cr.core.state_machine import Command, WorkflowState
 
@@ -1723,6 +1724,85 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         if self.app_service.state is WorkflowState.CONNECTED:
             self.app_service.dispatch(Command.POWER_ON)
 
+    @staticmethod
+    def _gate_widget_enabled(widget, allowed):
+        if widget is not None:
+            widget.setEnabled(widget.isEnabled() and bool(allowed))
+
+    def _apply_application_workflow_gates(self, dataset):
+        episode_active = bool(dataset["episode_active"])
+        episode_pending = bool(dataset["buffered_frames"]) and not episode_active
+        policy = workflow_ui_policy(
+            self.app_service.state,
+            episode_active=episode_active,
+            episode_pending=episode_pending,
+        )
+
+        # Application state is the workflow gate. Existing device/busy checks
+        # have already run in refresh_teleop_ui(), so this only narrows access.
+        for name in (
+            "gello_page_connect_robot",
+            "teleop_connect_robot_button",
+        ):
+            self._gate_widget_enabled(
+                getattr(self, name, None),
+                policy.connect_robot,
+            )
+
+        for name in (
+            "gello_page_power_on",
+            "teleop_power_on_button",
+        ):
+            self._gate_widget_enabled(
+                getattr(self, name, None),
+                policy.power_on,
+            )
+
+        for name in (
+            "gello_page_start",
+            "teleop_start_button",
+        ):
+            self._gate_widget_enabled(
+                getattr(self, name, None),
+                policy.start_teleop,
+            )
+
+        for name in (
+            "gello_page_estop",
+            "teleop_estop_button",
+        ):
+            self._gate_widget_enabled(
+                getattr(self, name, None),
+                policy.emergency_stop,
+            )
+
+        self._gate_widget_enabled(
+            getattr(self, "lerobot_start_button", None),
+            policy.start_episode,
+        )
+        self._gate_widget_enabled(
+            getattr(self, "lerobot_stop_button", None),
+            policy.stop_episode,
+        )
+
+        outcome = self.lerobot_outcome.currentData()
+        if outcome == "success":
+            save_allowed = policy.save_success
+        elif outcome == "failure" or dataset["error"]:
+            save_allowed = policy.save_failure
+        else:
+            save_allowed = (
+                policy.save_success or policy.save_failure
+            )
+        self._gate_widget_enabled(
+            getattr(self, "lerobot_save_button", None),
+            save_allowed,
+        )
+        self._gate_widget_enabled(
+            getattr(self, "lerobot_discard_button", None),
+            policy.discard_episode,
+        )
+
     def _drain_application_events(self):
         events = self.app_event_buffer.drain()
         for event in events:
@@ -3118,6 +3198,9 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                     "info" if ready and self._camera_frames_ready() else "error",
                     "准备流程结束；请按页面反馈逐项检查，不会自动启动跟随",
                 )
+
+        self._apply_application_workflow_gates(dataset)
+
         while True:
             try:
                 level, message = self.teleop_engine.events.get_nowait()
