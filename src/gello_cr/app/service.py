@@ -229,6 +229,72 @@ class ApplicationService:
                 value=value,
             )
 
+    def report_external_fault(
+        self,
+        reason: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> WorkflowState:
+        """Synchronize a fault that the runtime has already handled safely.
+
+        Unlike dispatch(REPORT_FAULT), this deliberately does not invoke the
+        REPORT_FAULT command handler. TeleopEngine has already stopped its
+        command producers and entered its own fault state.
+
+        ESTOP always has priority over an observed runtime fault.
+        """
+
+        message = str(reason).strip() or "runtime fault"
+        data = MappingProxyType(dict(details or {}))
+
+        with self._lock:
+            current = self._state_machine.state
+
+            if current is WorkflowState.ESTOP:
+                if self._last_error != message:
+                    self._last_error = message
+                    self._emit_locked(
+                        kind="external_fault_observed",
+                        level=EventLevel.ERROR,
+                        message=message,
+                        command=Command.REPORT_FAULT,
+                        details=data,
+                    )
+                return current
+
+            if current is WorkflowState.FAULT:
+                if self._last_error != message:
+                    self._last_error = message
+                    self._emit_locked(
+                        kind="external_fault_observed",
+                        level=EventLevel.ERROR,
+                        message=message,
+                        command=Command.REPORT_FAULT,
+                        details=data,
+                    )
+                return current
+
+            previous_state = current
+            new_state = self._state_machine.apply(Command.REPORT_FAULT)
+            self._last_error = message
+            self._emit_locked(
+                kind="state_changed",
+                level=EventLevel.WARNING,
+                message=(
+                    f"{previous_state.name} -> {new_state.name} "
+                    "by external runtime fault"
+                ),
+                command=Command.REPORT_FAULT,
+                details=data,
+            )
+            self._emit_locked(
+                kind="external_fault_observed",
+                level=EventLevel.ERROR,
+                message=message,
+                command=Command.REPORT_FAULT,
+                details=data,
+            )
+            return new_state
+
     def _emit_locked(
         self,
         *,

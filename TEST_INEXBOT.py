@@ -1717,6 +1717,21 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         if self.app_service.state is WorkflowState.CONNECTED:
             self.app_service.dispatch(Command.POWER_ON)
 
+    def _sync_application_runtime_state(self):
+        runtime_state = self.teleop_engine.state
+        if runtime_state != "fault":
+            return
+        if self.app_service.state is WorkflowState.ESTOP:
+            return
+        reason = self.teleop_engine.last_error or "TeleopEngine runtime fault"
+        self.app_service.report_external_fault(
+            reason,
+            {
+                "runtime": "TeleopEngine",
+                "runtime_state": runtime_state,
+            },
+        )
+
     def _app_start_episode(self, task, root, context):
         return self.app_service.dispatch(
             Command.START_EPISODE,
@@ -2822,6 +2837,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
     def refresh_teleop_ui(self):
         snapshot = self.teleop_engine.snapshot()
         self._latest_teleop_snapshot = snapshot
+        self._sync_application_runtime_state()
         dataset = self.lerobot_recorder.snapshot()
         cfg = self.teleop_store.data
         now = time.monotonic()
