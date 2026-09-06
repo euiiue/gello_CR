@@ -16,6 +16,7 @@ import os
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -26,38 +27,15 @@ from typing import Any, Callable, Optional
 import cv2
 import numpy as np
 
+_V2_SRC_DIR = Path(__file__).resolve().parent / "src"
+if str(_V2_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_V2_SRC_DIR))
 
-CR5_JOINT_STATE_NAMES = tuple(f"cr5.j{index}.rad" for index in range(1, 7))
-CR5_TCP_STATE_NAMES = (
-    "cr5.tcp.x.m",
-    "cr5.tcp.y.m",
-    "cr5.tcp.z.m",
-    "cr5.tcp.roll.rad",
-    "cr5.tcp.pitch.rad",
-    "cr5.tcp.yaw.rad",
+from gello_cr.recording.schema import (
+    dataset_features as v2_dataset_features,
+    validate_recording_sample,
 )
-O6_STATE_NAMES = (
-    "o6.thumb_flex.position",
-    "o6.thumb_yaw.position",
-    "o6.index_flex.position",
-    "o6.middle_flex.position",
-    "o6.ring_flex.position",
-    "o6.little_flex.position",
-)
-ACTION_NAMES = (
-    "cr5.delta_tcp.x.m",
-    "cr5.delta_tcp.y.m",
-    "cr5.delta_tcp.z.m",
-    "cr5.delta_tcp.roll.rad",
-    "cr5.delta_tcp.pitch.rad",
-    "cr5.delta_tcp.yaw.rad",
-    "o6.thumb_flex.command",
-    "o6.thumb_yaw.command",
-    "o6.index_flex.command",
-    "o6.middle_flex.command",
-    "o6.ring_flex.command",
-    "o6.little_flex.command",
-)
+
 
 
 class LeRobotRecorderError(RuntimeError):
@@ -359,22 +337,7 @@ class LeRobotEpisodeRecorder:
         self._event("info", f"LeRobot Episode recording started: {task}")
 
     def _validate_sample(self, sample: dict[str, Any]) -> None:
-        image_keys = ("image_base_rgb", "image_wrist_rgb", "image_roi_rgb")
-        state = sample["observation_state"]
-        action = sample["action"]
-        for image_key in image_keys:
-            image = np.asarray(sample[image_key])
-            if image.ndim != 3 or image.shape[2] != 3:
-                raise ValueError(
-                    f"Camera RGB frame {image_key} is invalid: {image.shape}"
-                )
-        if len(state) != 18:
-            raise ValueError(f"observation.state must have 18 values, got {len(state)}")
-        if len(action) != 12:
-            raise ValueError(f"action must have 12 values, got {len(action)}")
-        values = [float(value) for value in (*state, *action)]
-        if not all(np.isfinite(values)):
-            raise ValueError("State/action contains non-finite values")
+        validate_recording_sample(sample)
 
     def _add_sample(self, sample: dict[str, Any]) -> None:
         self._validate_sample(sample)
@@ -627,35 +590,8 @@ class LeRobotEpisodeRecorder:
 
 
 def _dataset_features(height: int, width: int) -> dict[str, dict[str, Any]]:
-    return {
-        "observation.state": {
-            "dtype": "float32",
-            "shape": (18,),
-            "names": list(
-                CR5_JOINT_STATE_NAMES + CR5_TCP_STATE_NAMES + O6_STATE_NAMES
-            ),
-        },
-        "action": {
-            "dtype": "float32",
-            "shape": (12,),
-            "names": list(ACTION_NAMES),
-        },
-        "observation.images.base_0_rgb": {
-            "dtype": "video",
-            "shape": (height, width, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "observation.images.left_wrist_0_rgb": {
-            "dtype": "video",
-            "shape": (height, width, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "observation.images.right_wrist_0_rgb": {
-            "dtype": "video",
-            "shape": (height, width, 3),
-            "names": ["height", "width", "channel"],
-        },
-    }
+    return v2_dataset_features(height, width)
+
 
 
 def _worker_main(fd: int) -> int:
