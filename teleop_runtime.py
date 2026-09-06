@@ -29,6 +29,11 @@ import numpy as np
 # is still launched from the repository root, while new code uses a src layout.
 try:
     from gello_cr.control.joint_mapping import RelativeJointMapper
+    from gello_cr.control.joint_safety import (
+        LeaderSpeedViolationCounter,
+        max_command_step_violation,
+        max_tracking_error_violation,
+    )
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -39,6 +44,11 @@ except ModuleNotFoundError as exc:
     if str(_V2_SRC_DIR) not in sys.path:
         sys.path.insert(0, str(_V2_SRC_DIR))
     from gello_cr.control.joint_mapping import RelativeJointMapper
+    from gello_cr.control.joint_safety import (
+        LeaderSpeedViolationCounter,
+        max_command_step_violation,
+        max_tracking_error_violation,
+    )
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -2268,7 +2278,7 @@ class TeleopEngine:
         last_leader_timestamp = master_origin.timestamp
         commanded = np.asarray(slave_origin[:6], dtype=float)
         last_target = commanded.copy()
-        speed_counts = np.zeros(6, dtype=int)
+        speed_guard = LeaderSpeedViolationCounter()
         next_cycle = time.monotonic()
         startup_settle_deadline = next_cycle + float(gello_cfg.get("startup_settle_s", 0.5))
         last_hand_action: Optional[str] = None
@@ -2305,7 +2315,7 @@ class TeleopEngine:
                     last_leader = leader_origin.copy()
                     last_leader_timestamp = master.timestamp
                     last_target = commanded.copy()
-                    speed_counts.fill(0)
+                    speed_guard.reset()
                     next_cycle += period
                     wait_time = next_cycle - time.monotonic()
                     if wait_time > 0:
@@ -2371,12 +2381,16 @@ class TeleopEngine:
                     ),
                     dtype=float,
                 )
-                target_delta_rad = np.abs(np.deg2rad(target - last_target))
-                if np.max(target_delta_rad) > step_limit:
-                    index = int(np.argmax(target_delta_rad))
+                step_violation = max_command_step_violation(
+                    target,
+                    last_target,
+                    step_limit,
+                )
+                if step_violation is not None:
                     raise RuntimeError(
-                        f"GELLO J{index + 1} command step "
-                        f"{target_delta_rad[index]:.4f}rad exceeds {step_limit:.4f}rad"
+                        f"GELLO J{step_violation.joint_number} command step "
+                        f"{step_violation.value:.4f}rad exceeds "
+                        f"{step_violation.limit:.4f}rad"
                     )
                 if master.timestamp != last_leader_timestamp:
                     leader_delta_rad = np.asarray(
@@ -2386,17 +2400,18 @@ class TeleopEngine:
                         ),
                         dtype=float,
                     )
-                    change_period = max(
-                        1e-3, master.timestamp - last_leader_timestamp
+                    speed_sample = speed_guard.update(
+                        leader_delta_rad,
+                        master.timestamp - last_leader_timestamp,
+                        speed_limit,
+                        speed_cycles,
                     )
-                    speed = leader_delta_rad / change_period
-                    speed_over_limit = speed > speed_limit
-                    speed_counts = np.where(speed_over_limit, speed_counts + 1, 0)
-                    index = int(np.argmax(speed_counts))
-                    if int(speed_counts[index]) >= speed_cycles:
+                    if speed_sample.violation is not None:
+                        violation = speed_sample.violation
                         raise RuntimeError(
-                            f"GELLO J{index + 1} leader speed "
-                            f"{speed[index]:.3f}rad/s exceeds {speed_limit:.3f}rad/s"
+                            f"GELLO J{violation.joint_number} leader speed "
+                            f"{violation.value:.3f}rad/s exceeds "
+                            f"{violation.limit:.3f}rad/s"
                         )
                     last_leader = leader.copy()
                     last_leader_timestamp = master.timestamp
@@ -2406,12 +2421,17 @@ class TeleopEngine:
                     actual = np.asarray(self.robot.joint_position()[:6], dtype=float)
                     feedback_at = time.monotonic()
                     feedback_read_ms = (feedback_at - read_started) * 1000.0
-                tracking_error = np.abs(np.deg2rad(last_target - actual))
-                if np.max(tracking_error) > tracking_limit:
-                    index = int(np.argmax(tracking_error))
+                tracking_violation = max_tracking_error_violation(
+                    last_target,
+                    actual,
+                    tracking_limit,
+                )
+                if tracking_violation is not None:
+                    index = tracking_violation.joint_number - 1
                     raise RuntimeError(
-                        f"CR5 J{index + 1} tracking error "
-                        f"{tracking_error[index]:.4f}rad exceeds {tracking_limit:.4f}rad; "
+                        f"CR5 J{tracking_violation.joint_number} tracking error "
+                        f"{tracking_violation.value:.4f}rad exceeds "
+                        f"{tracking_violation.limit:.4f}rad; "
                         f"target={last_target[index]:.3f}deg, "
                         f"actual={actual[index]:.3f}deg"
                     )
