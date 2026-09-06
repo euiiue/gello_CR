@@ -20,6 +20,7 @@ from .schema import (
     validate_recording_sample,
 )
 from .worker_client import WorkerClient, WorkerClientError
+from .worker_service import WorkerDatasetService, run_worker
 
 __all__ = [
     "LEROBOT_IMAGE_FEATURE_KEYS",
@@ -30,6 +31,7 @@ __all__ = [
     "SAMPLE_IMAGE_KEYS",
     "WorkerClient",
     "WorkerClientError",
+    "WorkerDatasetService",
     "crop_normalized_roi",
     "dataset_features",
     "normalized_roi_bounds",
@@ -37,6 +39,7 @@ __all__ = [
     "read_exact",
     "receive_packet",
     "resize_rgb_for_openpi",
+    "run_worker",
     "send_packet",
     "validate_recording_sample",
 ]

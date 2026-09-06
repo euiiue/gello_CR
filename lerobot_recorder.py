@@ -48,6 +48,7 @@ from gello_cr.recording.schema import (
     dataset_features as v2_dataset_features,
     validate_recording_sample,
 )
+from gello_cr.recording.worker_service import run_worker as _run_worker_service
 
 
 
@@ -427,131 +428,8 @@ def _dataset_features(height: int, width: int) -> dict[str, dict[str, Any]]:
 
 
 def _worker_main(fd: int) -> int:
-    # Imported only inside the dedicated LeRobot environment.
-    from lerobot.configs.video import RGBEncoderConfig
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    return _run_worker_service(fd)
 
-    sock = socket.socket(fileno=fd)
-    dataset: Any = None
-    buffered_frames = 0
-    saved_episodes = 0
-    image_shape = (0, 0, 3)
-    try:
-        while True:
-            try:
-                request, raw = _receive_packet(sock)
-            except EOFError:
-                break
-            operation = request.get("op")
-            try:
-                if operation == "init":
-                    if dataset is not None:
-                        raise RuntimeError("Dataset is already initialized")
-                    root = Path(str(request["root"])).expanduser().resolve()
-                    if root.exists() and any(root.iterdir()):
-                        raise FileExistsError(f"Dataset directory is not empty: {root}")
-                    fps = int(request["fps"])
-                    height = int(request["height"])
-                    width = int(request["width"])
-                    if (height, width) != (224, 224):
-                        raise ValueError("PI0.5 recording image size must be 224x224")
-                    encoder = RGBEncoderConfig(
-                        vcodec="h264",
-                        pix_fmt="yuv420p",
-                        crf=28,
-                        preset="fast",
-                        g=fps,
-                    )
-                    dataset = LeRobotDataset.create(
-                        repo_id=str(request["repo_id"]),
-                        root=root,
-                        fps=fps,
-                        robot_type="dobot_cr5_o6",
-                        features=_dataset_features(height, width),
-                        use_videos=True,
-                        rgb_encoder=encoder,
-                        streaming_encoding=True,
-                        encoder_queue_maxsize=max(4, fps // 2),
-                        encoder_threads=2,
-                        batch_encoding_size=1,
-                    )
-                    image_shape = (height, width, 3)
-                    _send_packet(sock, {"ok": True, "root": str(root)})
-                elif operation == "add_frame":
-                    if dataset is None:
-                        raise RuntimeError("Dataset is not initialized")
-                    expected_per_image = int(np.prod(image_shape))
-                    expected = expected_per_image * 3
-                    if len(raw) != expected:
-                        raise ValueError(
-                            f"3-stream RGB payload is {len(raw)} bytes, expected {expected}"
-                        )
-                    images = np.frombuffer(raw, dtype=np.uint8).reshape(
-                        (3, *image_shape)
-                    ).copy()
-                    state = np.asarray(request["state"], dtype=np.float32)
-                    action = np.asarray(request["action"], dtype=np.float32)
-                    if state.shape != (18,) or action.shape != (12,):
-                        raise ValueError(
-                            f"Invalid state/action shapes: {state.shape}/{action.shape}"
-                        )
-                    dataset.add_frame(
-                        {
-                            "observation.images.base_0_rgb": images[0],
-                            "observation.images.left_wrist_0_rgb": images[1],
-                            "observation.images.right_wrist_0_rgb": images[2],
-                            "observation.state": state,
-                            "action": action,
-                            "task": str(request["task"]),
-                        }
-                    )
-                    buffered_frames += 1
-                    _send_packet(sock, {"ok": True, "frames": buffered_frames})
-                elif operation == "save_episode":
-                    if dataset is None or buffered_frames <= 0:
-                        raise RuntimeError("No Episode frames to save")
-                    # The dataset's episode index remains the source of truth.
-                    # Write diagnostics first so a sidecar write error cannot
-                    # turn an already committed episode into a retryable save.
-                    collection_dir = Path(dataset.root) / "meta" / "collection"
-                    collection_dir.mkdir(parents=True, exist_ok=True)
-                    collection = dict(request["collection"])
-                    collection["episode_index"] = saved_episodes
-                    (collection_dir / f"episode_{saved_episodes:06d}.json").write_text(
-                        json.dumps(collection, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
-                    )
-                    dataset.save_episode()
-                    saved_episodes += 1
-                    buffered_frames = 0
-                    _send_packet(sock, {"ok": True, "episodes": saved_episodes})
-                elif operation == "clear_episode":
-                    if dataset is not None and buffered_frames:
-                        dataset.clear_episode_buffer()
-                    buffered_frames = 0
-                    _send_packet(sock, {"ok": True})
-                elif operation == "finalize":
-                    if dataset is not None:
-                        if buffered_frames:
-                            raise RuntimeError("Unsaved Episode; save or discard explicitly")
-                        dataset.finalize()
-                    _send_packet(sock, {"ok": True, "episodes": saved_episodes})
-                    return 0
-                else:
-                    raise ValueError(f"Unknown worker operation: {operation}")
-            except Exception as exc:
-                _send_packet(
-                    sock,
-                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
-                )
-    finally:
-        if dataset is not None:
-            try:
-                dataset.finalize()
-            except Exception:
-                traceback.print_exc()
-        sock.close()
-    return 0
 
 
 def main() -> int:

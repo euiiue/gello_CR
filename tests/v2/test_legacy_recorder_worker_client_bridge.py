@@ -21,6 +21,17 @@ def _class_source(name: str) -> str:
     raise AssertionError(f"class not found: {name}")
 
 
+def _function_source(name: str) -> str:
+    source = _source()
+    module = ast.parse(source)
+    for node in ast.walk(module):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None
+            return segment
+    raise AssertionError(f"function not found: {name}")
+
+
 def test_root_recorder_imports_moved_worker_client_with_legacy_names() -> None:
     source = _source()
 
@@ -43,10 +54,7 @@ def test_episode_recorder_passes_root_script_to_worker_client() -> None:
     assert "worker_script=Path(__file__).resolve()" in source
 
 
-def test_root_worker_main_and_protocol_calls_remain_in_place() -> None:
-    source = _source()
+def test_root_worker_main_preserves_entrypoint_via_worker_service() -> None:
+    source = _function_source("_worker_main")
 
-    assert "def _worker_main(fd: int)" in source
-    assert "sock = socket.socket(fileno=fd)" in source
-    assert "request, raw = _receive_packet(sock)" in source
-    assert "_send_packet(" in source
+    assert "return _run_worker_service(fd)" in source
