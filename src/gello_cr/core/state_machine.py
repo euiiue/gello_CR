@@ -66,6 +66,14 @@ class WorkflowStateMachine:
             return self.state is WorkflowState.FAULT
         if command is Command.RESET_ESTOP:
             return self.state is WorkflowState.ESTOP
+        if (
+            self.state in (WorkflowState.FAULT, WorkflowState.ESTOP)
+            and command in (
+                Command.SAVE_FAILURE,
+                Command.DISCARD_EPISODE,
+            )
+        ):
+            return True
         return (self.state, command) in _NORMAL_TRANSITIONS
 
     def apply(self, command: Command) -> WorkflowState:
@@ -84,6 +92,15 @@ class WorkflowStateMachine:
 
         if command in (Command.RESET_FAULT, Command.RESET_ESTOP):
             self.state = self.recovery_state
+            return self.state
+
+        if (
+            self.state in (WorkflowState.FAULT, WorkflowState.ESTOP)
+            and command in (
+                Command.SAVE_FAILURE,
+                Command.DISCARD_EPISODE,
+            )
+        ):
             return self.state
 
         self.state = _NORMAL_TRANSITIONS[(self.state, command)]

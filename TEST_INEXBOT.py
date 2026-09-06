@@ -51,6 +51,12 @@ if str(_V2_SRC_DIR) not in sys.path:
 from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
 from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
 from gello_cr.recording.image_processing import crop_normalized_roi
+from gello_cr.app import (
+    ApplicationService,
+    RuntimeCommandBindings,
+    RuntimeLifecycleCallbacks,
+)
+from gello_cr.core.state_machine import Command, WorkflowState
 
 
 
@@ -1410,6 +1416,16 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             fps=int(dataset_cfg["fps"]),
             image_size=tuple(dataset_cfg["image_size"]),
         )
+        self.app_service = ApplicationService()
+        self.app_bindings = RuntimeCommandBindings(
+            self.app_service,
+            teleop_engine=self.teleop_engine,
+            recorder=self.lerobot_recorder,
+            lifecycle=RuntimeLifecycleCallbacks(
+                connect=self._app_require_robot_connected,
+                power_on=self._app_require_robot_enabled,
+            ),
+        ).install()
         self._build_teleop_tab()
         self._build_gello_page()
         self.timer_teleop_ui = QTimer(self)
@@ -1676,6 +1692,51 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         spin.setSuffix(suffix)
         spin.setKeyboardTracking(False)
         return spin
+
+    def _app_require_robot_connected(self):
+        if not self.robot1_connected or self.nrc_adapter is None:
+            raise RuntimeError("CR3A 尚未完成连接")
+        return self.nrc_adapter
+
+    def _app_require_robot_enabled(self):
+        adapter = self._app_require_robot_connected()
+        servo_state = int(adapter.servo_state())
+        if servo_state != 3:
+            raise RuntimeError(
+                f"CR3A 尚未进入运行状态，当前 servo_state={servo_state}"
+            )
+        return servo_state
+
+    def _app_confirm_connected(self):
+        if self.app_service.state is WorkflowState.OFFLINE:
+            self.app_service.dispatch(Command.CONNECT)
+
+    def _app_confirm_power_on(self):
+        if self.app_service.state is WorkflowState.OFFLINE:
+            self._app_confirm_connected()
+        if self.app_service.state is WorkflowState.CONNECTED:
+            self.app_service.dispatch(Command.POWER_ON)
+
+    def _app_start_episode(self, task, root, context):
+        return self.app_service.dispatch(
+            Command.START_EPISODE,
+            {
+                "task": task,
+                "base_root": root,
+                "metadata": context,
+            },
+        )
+
+    def _app_save_episode(self, outcome, notes):
+        command = (
+            Command.SAVE_SUCCESS
+            if outcome == "success"
+            else Command.SAVE_FAILURE
+        )
+        return self.app_service.dispatch(command, {"notes": notes})
+
+    def _app_discard_episode(self):
+        return self.app_service.dispatch(Command.DISCARD_EPISODE)
 
     def _build_teleop_tab(self):
         cfg = self.teleop_store.data
@@ -2396,6 +2457,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                     f"{transition.initial_state}→{transition.final_state}：{actions}；"
                     "主从跟随尚未启动，主臂保持当前模式",
                 )
+                self._app_confirm_power_on()
                 snapshot = getattr(self, "_latest_robot_snapshot", None)
                 if snapshot is not None:
                     joints, tcp, _servo_state, _poll_error = snapshot
@@ -2431,17 +2493,27 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         if not self.save_teleop_settings(show_event=False):
             return
         self.collection_verified.setChecked(False)
-        self._run_teleop_async("启动跟随", self.teleop_engine.start_follow)
+        self._run_teleop_async(
+            "启动跟随",
+            lambda: self.app_service.dispatch(Command.START_TELEOP),
+        )
 
     def TeleopFollowStop(self):
         self._run_teleop_async(
-            "停止跟随", lambda: self.teleop_engine.stop_follow("人工停止")
+            "停止跟随",
+            lambda: self.app_service.dispatch(
+                Command.STOP_TELEOP,
+                {"reason": "人工停止"},
+            ),
         )
 
     def TeleopStopCurrentAction(self):
         state = self.teleop_engine.state
         if state in ("following", "master_free"):
-            operation = lambda: self.teleop_engine.stop_follow("人工停止当前动作")
+            operation = lambda: self.app_service.dispatch(
+                Command.STOP_TELEOP,
+                {"reason": "人工停止当前动作"},
+            )
         elif state in ("replay", "episode_replay"):
             operation = lambda: self.teleop_engine.stop_joint_replay(
                 resume_follow=False
@@ -2612,14 +2684,14 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             self._run_episode_async(
                 "保存上一 Episode 并开始下一 Episode",
                 lambda: (
-                    self.lerobot_recorder.save_episode(outcome, "自动保存后开始下一条"),
-                    self.lerobot_recorder.start_episode(task, root, metadata=context),
+                    self._app_save_episode(outcome, "自动保存后开始下一条"),
+                    self._app_start_episode(task, root, context),
                 ),
             )
         else:
             self._run_episode_async(
                 "开始 LeRobot Episode",
-                lambda: self.lerobot_recorder.start_episode(task, root, metadata=context),
+                lambda: self._app_start_episode(task, root, context),
             )
 
     def LeRobotEpisodeStop(self):
@@ -2636,7 +2708,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         notes = self.lerobot_notes.text()
         self._run_episode_async(
             "保存 LeRobot Episode",
-            lambda: self.lerobot_recorder.save_episode(outcome, notes),
+            lambda: self._app_save_episode(outcome, notes),
         )
 
     def LeRobotEpisodeDiscard(self):
@@ -2649,7 +2721,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         )
         if answer != QMessageBox.Yes:
             return
-        self._run_episode_async("丢弃 LeRobot Episode", self.lerobot_recorder.discard_episode)
+        self._run_episode_async("丢弃 LeRobot Episode", self._app_discard_episode)
 
     def LeRobotDatasetFinalize(self):
         snapshot = self.lerobot_recorder.snapshot()
@@ -2690,7 +2762,11 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
 
     def EmergencyStop(self):
         self._run_teleop_async(
-            "软件紧急停止", lambda: self.teleop_engine.emergency_stop("用户触发软件紧急停止")
+            "软件紧急停止",
+            lambda: self.app_service.dispatch(
+                Command.EMERGENCY_STOP,
+                {"reason": "用户触发软件紧急停止"},
+            ),
         )
 
     def _collection_blockers(self, snapshot):
@@ -3883,6 +3959,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
 
                 self.teleop_engine.attach_robot(session)
                 self.robot1_connected = True
+                self._app_confirm_connected()
                 self._teleop_event(
                     "info",
                     f"纳博特控制柜已连接: {cfg['ip']}:{cfg['command_port']}/"
