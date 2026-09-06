@@ -1,5 +1,7 @@
+
 """UI-independent application orchestration."""
 
+from .event_buffer import ApplicationEventBuffer
 from .events import AppEvent, EventLevel
 from .runtime_bindings import (
     RuntimeCommandBindings,
@@ -13,6 +15,7 @@ from .service import (
 
 __all__ = [
     "AppEvent",
+    "ApplicationEventBuffer",
     "ApplicationService",
     "ApplicationSnapshot",
     "CommandResult",

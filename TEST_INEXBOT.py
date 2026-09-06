@@ -52,6 +52,7 @@ from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
 from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
 from gello_cr.recording.image_processing import crop_normalized_roi
 from gello_cr.app import (
+    ApplicationEventBuffer,
     ApplicationService,
     RuntimeCommandBindings,
     RuntimeLifecycleCallbacks,
@@ -1426,6 +1427,11 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                 power_on=self._app_require_robot_enabled,
             ),
         ).install()
+        self.app_event_buffer = ApplicationEventBuffer(capacity=256)
+        self._app_event_unsubscribe = self.app_service.subscribe(
+            self.app_event_buffer.push
+        )
+        self._app_event_dropped_reported = 0
         self._build_teleop_tab()
         self._build_gello_page()
         self.timer_teleop_ui = QTimer(self)
@@ -1716,6 +1722,42 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             self._app_confirm_connected()
         if self.app_service.state is WorkflowState.CONNECTED:
             self.app_service.dispatch(Command.POWER_ON)
+
+    def _drain_application_events(self):
+        events = self.app_event_buffer.drain()
+        for event in events:
+            level = event.level.value
+            command_name = event.command.name if event.command is not None else "-"
+            message = (
+                f"[APP][{event.kind}][{event.state.name}] "
+                f"{command_name}: {event.message}"
+            )
+            self._file_logger.log(
+                getattr(logging, level.upper(), logging.INFO),
+                message,
+            )
+            self.teleop_log.appendPlainText(
+                f"[{time.strftime('%H:%M:%S')}] "
+                f"{level.upper()}: {message}"
+            )
+            self.statusBar().showMessage(
+                message,
+                10000 if level == "error" else 5000,
+            )
+
+        dropped = self.app_event_buffer.dropped_count
+        if dropped > self._app_event_dropped_reported:
+            delta = dropped - self._app_event_dropped_reported
+            self._app_event_dropped_reported = dropped
+            warning = (
+                f"[APP] 事件缓冲已丢弃 {delta} 条旧事件；"
+                f"累计丢弃 {dropped} 条"
+            )
+            self._file_logger.warning(warning)
+            self.teleop_log.appendPlainText(
+                f"[{time.strftime('%H:%M:%S')}] WARNING: {warning}"
+            )
+            self.statusBar().showMessage(warning, 10000)
 
     def _sync_application_runtime_state(self):
         runtime_state = self.teleop_engine.state
@@ -2838,6 +2880,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         snapshot = self.teleop_engine.snapshot()
         self._latest_teleop_snapshot = snapshot
         self._sync_application_runtime_state()
+        self._drain_application_events()
         dataset = self.lerobot_recorder.snapshot()
         cfg = self.teleop_store.data
         now = time.monotonic()
