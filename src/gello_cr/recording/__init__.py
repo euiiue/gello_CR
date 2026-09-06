@@ -6,6 +6,13 @@ from .frame import (
     resize_rgb_for_openpi,
 )
 from .image_processing import RoiCrop, crop_normalized_roi, normalized_roi_bounds
+from .protocol import (
+    MAX_HEADER_SIZE,
+    MAX_RAW_SIZE,
+    read_exact,
+    receive_packet,
+    send_packet,
+)
 from .schema import (
     LEROBOT_IMAGE_FEATURE_KEYS,
     SAMPLE_IMAGE_KEYS,
@@ -15,6 +22,8 @@ from .schema import (
 
 __all__ = [
     "LEROBOT_IMAGE_FEATURE_KEYS",
+    "MAX_HEADER_SIZE",
+    "MAX_RAW_SIZE",
     "PreparedRecordingFrame",
     "RoiCrop",
     "SAMPLE_IMAGE_KEYS",
@@ -22,6 +31,9 @@ __all__ = [
     "dataset_features",
     "normalized_roi_bounds",
     "prepare_recording_frame",
+    "read_exact",
+    "receive_packet",
     "resize_rgb_for_openpi",
+    "send_packet",
     "validate_recording_sample",
 ]

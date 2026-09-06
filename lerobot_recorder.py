@@ -35,6 +35,11 @@ from gello_cr.recording.frame import (
     prepare_recording_frame,
     resize_rgb_for_openpi,
 )
+from gello_cr.recording.protocol import (
+    read_exact as _read_exact,
+    receive_packet as _receive_packet,
+    send_packet as _send_packet,
+)
 from gello_cr.recording.schema import (
     dataset_features as v2_dataset_features,
     validate_recording_sample,
@@ -46,35 +51,6 @@ class LeRobotRecorderError(RuntimeError):
     pass
 
 
-
-def _read_exact(sock: socket.socket, size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = int(size)
-    while remaining:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise EOFError("LeRobot worker connection closed")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _send_packet(sock: socket.socket, payload: dict[str, Any], raw: bytes = b"") -> None:
-    message = dict(payload)
-    message["raw_size"] = len(raw)
-    encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    sock.sendall(struct.pack("!I", len(encoded)) + encoded + raw)
-
-
-def _receive_packet(sock: socket.socket) -> tuple[dict[str, Any], bytes]:
-    header_size = struct.unpack("!I", _read_exact(sock, 4))[0]
-    if header_size <= 0 or header_size > 4 * 1024 * 1024:
-        raise ValueError(f"Invalid protocol header size: {header_size}")
-    payload = json.loads(_read_exact(sock, header_size).decode("utf-8"))
-    raw_size = int(payload.pop("raw_size", 0))
-    if raw_size < 0 or raw_size > 16 * 1024 * 1024:
-        raise ValueError(f"Invalid protocol raw size: {raw_size}")
-    return payload, _read_exact(sock, raw_size) if raw_size else b""
 
 
 class _WorkerClient:
