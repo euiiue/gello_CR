@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import traceback
+
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -37,9 +40,11 @@ class OperatorMainWindow(QMainWindow):
         command_port: CommandPort,
         *,
         refresh_ms: int = 100,
+        close_callback=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self._close_callback = close_callback
         self._presenter = presenter
         self._command_port = command_port
         self._last_preview_timestamps = (-1.0, -1.0)
@@ -62,6 +67,10 @@ class OperatorMainWindow(QMainWindow):
         layout.addWidget(self._build_log_group())
 
         self._apply_operator_style()
+        self._estop_shortcut = QShortcut(QKeySequence("F12"), self)
+        self._estop_shortcut.activated.connect(
+            lambda: self._submit(Command.EMERGENCY_STOP)
+        )
 
         self._timer = QTimer(self)
         self._timer.setInterval(max(20, int(refresh_ms)))
@@ -339,6 +348,7 @@ class OperatorMainWindow(QMainWindow):
             self._command_port.submit(
                 CommandRequest.create(command, payload)
             )
+            self.refresh_from_presenter()
         except Exception as exc:
             self.event_log.appendPlainText(
                 f"LOCAL ERROR · {command.name}: "
@@ -356,6 +366,14 @@ class OperatorMainWindow(QMainWindow):
             frame.readiness,
             frame.view_model,
         )
+        pending = getattr(self._command_port, "pending_commands", frozenset())
+        if pending:
+            for button in self.findChildren(QPushButton):
+                if button is not self.estop_button:
+                    button.setEnabled(False)
+            self.statusBar().showMessage("BUSY · " + ", ".join(sorted(c.name for c in pending)))
+        else:
+            self.statusBar().clearMessage()
         self.render_preview(frame.preview)
         for event in frame.events:
             self.append_event(event)
@@ -385,8 +403,8 @@ class OperatorMainWindow(QMainWindow):
         self.stop_teleop_button.setEnabled(
             view.workflow_state is WorkflowState.TELEOP_RUNNING
         )
-        self.reset_fault_button.setEnabled(policy.reset_fault)
-        self.reset_estop_button.setEnabled(policy.reset_estop)
+        self.reset_fault_button.setEnabled(policy.reset_fault and not (view.episode_active or view.episode_pending))
+        self.reset_estop_button.setEnabled(policy.reset_estop and not (view.episode_active or view.episode_pending))
         self.estop_button.setEnabled(policy.emergency_stop)
 
         self.episode_start_button.setEnabled(policy.start_episode)
@@ -443,7 +461,7 @@ class OperatorMainWindow(QMainWindow):
         )
 
         if readiness.camera_error:
-            camera_text = "ERROR"
+            camera_text = "ERROR · " + readiness.camera_error[:80]
             self.camera_status.setToolTip(readiness.camera_error)
         elif readiness.camera_frames_ready:
             camera_text = "fresh"
@@ -576,7 +594,28 @@ class OperatorMainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._presenter.closed:
+            event.accept()
+            return
+        view = self._presenter.poll().view_model
+        if view.episode_active or view.episode_pending:
+            QMessageBox.warning(
+                self, "Episode 尚未处理",
+                "请先 STOP_EPISODE，再明确保存成功、保存失败或丢弃。当前窗口保持打开。",
+            )
+            event.ignore()
+            return
+        try:
+            if self._close_callback is not None:
+                self._close_callback()
+            else:
+                self._command_port.close(timeout=1.0)
+                self._presenter.close()
+        except Exception as exc:
+            traceback.print_exception(exc)
+            QMessageBox.critical(self, "退出未完成", f"{exc!r}\n请查看终端诊断并重试退出。")
+            self.event_log.appendPlainText(f"SHUTDOWN ERROR: {exc!r}")
+            event.ignore()
+            return
         self._timer.stop()
-        self._command_port.close(timeout=1.0)
-        self._presenter.close()
-        super().closeEvent(event)
+        event.accept()

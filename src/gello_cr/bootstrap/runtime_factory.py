@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,10 @@ class Cr3aLifecycle:
         self.device: Any | None = None
         self.session: Any | None = None
 
+        # Tracks the application's requested robot power state.
+        # A fault/reset from CONNECTED must never enable the robot.
+        self._desired_enabled = False
+
     def _event(self, level: str, message: str) -> None:
         if self._event_callback is not None:
             self._event_callback(level, message)
@@ -124,7 +128,7 @@ class Cr3aLifecycle:
             servoj_vmax=float(cfg['servoj_vmax']),
             servoj_amax=float(cfg['servoj_amax']),
             servoj_jmax=float(cfg['servoj_jmax']),
-            sdk_root=(
+            sdk_root=cfg.get('sdk_root') or (
                 str(self._paths.nrc_sdk_root)
                 if self._paths.nrc_sdk_root is not None
                 else None
@@ -169,25 +173,55 @@ class Cr3aLifecycle:
         state = int(session.servo_state())
         if state != 3:
             raise RuntimeError(f'CR3A 上使能确认失败，servo_state={state}')
+        self._desired_enabled = True
         return transition
 
     def power_off(self) -> Any:
         session = self._require_session()
         self._teleop_engine.emergency_stop('下使能前停止当前动作')
+        session.stop_motion()
         transition = session.power_off()
         state = int(session.servo_state())
         if state not in (0, 1):
             raise RuntimeError(f'CR3A 下使能确认失败，servo_state={state}')
+        self._desired_enabled = False
         return transition
 
     def _reset(self, label: str) -> Any:
         session = self._require_session()
-        transition = session.power_on()
-        state = int(session.servo_state())
-        if state != 3:
-            raise RuntimeError(f'{label}失败，servo_state={state}')
+        transition = None
+
+        # Only restore servo power if this application had explicitly
+        # enabled the robot before the safety transition.
+        #
+        # CONNECTED -> FAULT/ESTOP -> RESET therefore stays CONNECTED
+        # and must never power the robot on.
+        if self._desired_enabled:
+            state = int(session.servo_state())
+
+            if state != 3:
+                transition = session.power_on()
+                state = int(session.servo_state())
+
+            if state != 3:
+                raise RuntimeError(
+                    f'{label}失败，servo_state={state}'
+                )
+
         self._teleop_engine.acknowledge_fault()
-        self._event('info', f'{label}完成；保持 idle，不自动恢复跟随')
+
+        if self._desired_enabled:
+            message = (
+                f'{label}完成；恢复使能状态，保持 idle，'
+                '不自动恢复跟随'
+            )
+        else:
+            message = (
+                f'{label}完成；保持未使能状态，'
+                '不自动恢复跟随'
+            )
+
+        self._event('info', message)
         return transition
 
     def reset_fault(self) -> Any:
@@ -196,18 +230,33 @@ class Cr3aLifecycle:
     def reset_estop(self) -> Any:
         return self._reset('ESTOP 复位')
 
+    def shutdown_power(self) -> None:
+        session = self.session
+        if session is not None and session.servo_state() == 3:
+            session.power_off()
+            if session.servo_state() not in (0, 1):
+                raise RuntimeError("Shutdown power-off not confirmed")
+            self._desired_enabled = False
+
     def disconnect(self) -> bool:
         device = self.device
         session = self.session
+        errors = []
         if session is not None:
-            self._teleop_engine.detach_robot(
-                session,
-                'ApplicationService 断开 CR3A',
-            )
+            try:
+                self._teleop_engine.detach_robot(session, 'ApplicationService 断开 CR3A')
+            except Exception as exc:
+                errors.append(exc)
         if device is not None:
-            device.close()
+            try:
+                device.close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup('CR3A disconnect incomplete', errors)
         self.device = None
         self.session = None
+        self._desired_enabled = False
         self._event('info', 'CR3A 已断开；不会自动重连')
         return True
 
@@ -241,6 +290,33 @@ class ConcreteRuntime:
     @property
     def lifecycle(self) -> RuntimeLifecycleCallbacks:
         return self.cr3a_lifecycle.callbacks()
+
+    _closed_resources: set[str] = field(default_factory=set, init=False)
+
+    def close(self) -> None:
+        """Attempt every cleanup; retain failures so a second close can retry."""
+        errors = []
+        steps = [
+            ("motion", lambda: self.teleop_engine.shutdown(close_devices=False)),
+            ("robot_power", self.cr3a_lifecycle.shutdown_power),
+            ("robot_connection", self.cr3a_lifecycle.disconnect),
+            ("gello", lambda: self.gello_controller.close(hold=False)),
+            ("inverse3", lambda: self.inverse3_controller.close(hold=False)),
+            ("roarm", lambda: self.roarm_controller.close(hold=False)),
+            ("o6", self.o6_controller.close),
+        ]
+        for name, close in steps:
+            if name in self._closed_resources:
+                continue
+            try:
+                close()
+            except Exception as exc:
+                exc.add_note(f"shutdown resource: {name}")
+                errors.append(exc)
+            else:
+                self._closed_resources.add(name)
+        if errors:
+            raise ExceptionGroup("Runtime shutdown incomplete", errors)
 
 
 class ConcreteRuntimeFactory:

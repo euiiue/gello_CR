@@ -10,6 +10,7 @@ class Session:
     def __init__(self):
         self.state = 1
         self.calls = []
+    def stop_motion(self): self.calls.append('stop_motion')
     def power_on(self):
         self.calls.append('power_on')
         self.state = 3
@@ -108,16 +109,30 @@ def test_power_on_and_off_use_existing_session(tmp_path) -> None:
     assert life._teleop_engine.estops == ['下使能前停止当前动作']
 
 
-def test_reset_acknowledges_runtime_but_never_starts_follow(tmp_path) -> None:
+def test_reset_from_connected_acknowledges_without_power_on(
+    tmp_path,
+) -> None:
     life = lifecycle(tmp_path)
     session = life.connect()
+
+    # Simulate a connected/non-enabled controller state.
     session.state = 2
 
     life.reset_fault()
 
-    assert session.state == 3
+    # RESET from a connection that was never explicitly POWER_ON must
+    # never enable the robot.
+    assert session.state == 2
+    assert 'power_on' not in session.calls
+
+    # Runtime fault acknowledgement still occurs.
     assert life._teleop_engine.acks == 1
-    assert not hasattr(life._teleop_engine, 'start_follow_called')
+
+    # RESET must never resume teleoperation.
+    assert not hasattr(
+        life._teleop_engine,
+        'start_follow_called',
+    )
 
 
 def test_disconnect_detaches_then_closes_and_clears_refs(tmp_path) -> None:

@@ -93,6 +93,10 @@ def prepare_recording_frame(
         "task": str(task),
         "height": int(height),
         "width": int(width),
+        "sample_metadata": {
+            "timestamp": sample["timestamp"],
+            "quality": dict(sample.get("quality", {})),
+        },
     }
 
     raw = b"".join(image.tobytes(order="C") for image in images)

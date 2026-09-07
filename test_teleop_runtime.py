@@ -519,6 +519,7 @@ class LeRobotRecorderContractTests(unittest.TestCase):
         )
         image = np.zeros((8, 8, 3), dtype=np.uint8)
         sample = {
+            "timestamp": time.monotonic(),
             "image_base_rgb": image,
             "image_wrist_rgb": image,
             "image_roi_rgb": image,

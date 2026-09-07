@@ -153,6 +153,10 @@ class LeRobotEpisodeRecorder:
 
     def _validate_sample(self, sample: dict[str, Any]) -> None:
         validate_recording_sample(sample)
+        quality = sample.get("quality", {})
+        for flag in ("wrist_age_exceeded", "base_age_exceeded", "camera_skew_exceeded"):
+            if quality.get(flag, 0):
+                raise WorkerClientError(f"Cannot start Episode: {flag}")
 
     def _add_sample(self, sample: dict[str, Any]) -> None:
         with self._lock:

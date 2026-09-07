@@ -136,7 +136,7 @@ def test_close_discards_pending_normal_commands() -> None:
 
     port.submit(CommandRequest.create(Command.CONNECT))
     assert first_started.wait(1.0)
-    port.submit(CommandRequest.create(Command.CONNECT))
+    port.submit(CommandRequest.create(Command.POWER_ON))
 
     port.close(timeout=0.0)
     release.set()

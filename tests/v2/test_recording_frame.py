@@ -11,6 +11,7 @@ from gello_cr.recording.frame import (
 
 def _sample(value_base: int = 1, value_wrist: int = 2, value_roi: int = 3):
     return {
+        "timestamp": 10.0,
         "observation_state": list(range(18)),
         "action": list(range(12)),
         "image_base_rgb": np.full((2, 2, 3), value_base, dtype=np.uint8),
@@ -66,6 +67,7 @@ def test_prepare_frame_preserves_add_frame_payload_contract() -> None:
         "task": "Pick object",
         "height": 2,
         "width": 2,
+        "sample_metadata": {"timestamp": 10.0, "quality": {}},
     }
 
 

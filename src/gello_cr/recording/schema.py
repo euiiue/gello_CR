@@ -33,19 +33,28 @@ def validate_recording_sample(sample: Mapping[str, Any]) -> None:
 
     for image_key in SAMPLE_IMAGE_KEYS:
         image = np.asarray(sample[image_key])
-        if image.ndim != 3 or image.shape[2] != 3:
+        if image.ndim != 3 or image.shape[2] != 3 or not image.size:
             raise ValueError(
                 f"Camera RGB frame {image_key} is invalid: {image.shape}"
             )
 
-    if len(state) != STATE_DIM:
+        if not np.isfinite(image).all():
+            raise ValueError(f"Camera RGB frame {image_key} contains non-finite values")
+
+    if np.asarray(state).shape != (STATE_DIM,):
         raise ValueError(
             f"observation.state must have {STATE_DIM} values, got {len(state)}"
         )
-    if len(action) != ACTION_DIM:
+    if np.asarray(action).shape != (ACTION_DIM,):
         raise ValueError(
             f"action must have {ACTION_DIM} values, got {len(action)}"
         )
+
+    if not np.isfinite(float(sample["timestamp"])):
+        raise ValueError("Sample timestamp is non-finite")
+    for key, value in sample.get("quality", {}).items():
+        if not np.isfinite(float(value)):
+            raise ValueError(f"Quality {key} is non-finite")
 
     values = [float(value) for value in (*state, *action)]
     if not all(np.isfinite(values)):

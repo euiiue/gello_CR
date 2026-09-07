@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 import sys
 import threading
 import time
@@ -142,23 +143,43 @@ class Cr3aDevice:
             self._api = self._api_loader()
             return self._api
 
-        if self.config.sdk_root:
-            root = Path(self.config.sdk_root).expanduser().resolve()
-            if not root.is_dir():
-                raise FileNotFoundError(
-                    f"CR3A NRC sdk_root does not exist: {root}"
+        root = Path(
+            os.environ.get("NRC_SDK_ROOT")
+            or self.config.sdk_root
+            or Path(__file__).resolve().parents[3] / "TESTRobot_INEXBOT"
+        ).expanduser().resolve()
+        if not (root / "nrc_interface.py").is_file():
+            raise FileNotFoundError(
+                f"NRC Python module missing: {root / 'nrc_interface.py'}. "
+                "Set NRC_SDK_ROOT or robot.sdk_root to the SDK directory."
+            )
+        # SWIG imports _nrc_host by its top-level name. Never mix SDK copies
+        # already cached by Python with an explicitly selected SDK directory.
+        for name in ("nrc_interface", "_nrc_host"):
+            loaded = sys.modules.get(name)
+            if loaded is not None and Path(loaded.__file__).resolve().parent != root:
+                raise RuntimeError(
+                    f"NRC SDK conflict: {name} already loaded from {loaded.__file__}; "
+                    f"requested {root}. Restart the application to change SDK."
                 )
-            root_text = str(root)
-            if root_text not in sys.path:
-                sys.path.insert(0, root_text)
-
+        sys.path.insert(0, str(root))
         try:
             self._api = importlib.import_module("nrc_interface")
-        except Exception as exc:
+        except ModuleNotFoundError as exc:
             raise RuntimeError(
-                "Unable to import nrc_interface. Configure robot.sdk_root "
-                "or inject the NRC API."
+                f"NRC Python module lookup failed in {root}: {exc}. "
+                "Check nrc_interface.py and _nrc_host extension files; "
+                "LD_LIBRARY_PATH does not fix Python module lookup."
             ) from exc
+        except (ImportError, OSError) as exc:
+            raise RuntimeError(
+                f"NRC native SDK loading failed in {root}: {exc}. "
+                "Check Python ABI/architecture and shared-library dependencies "
+                "with ldd. Set LD_LIBRARY_PATH before launching Python if needed; "
+                "PYTHONPATH does not resolve missing shared libraries."
+            ) from exc
+        finally:
+            sys.path.remove(str(root))
         return self._api
 
     def connect(self, timeout: float = 10.0) -> RobotSnapshot:
@@ -370,28 +391,28 @@ class Cr3aDevice:
         self._require_session().stop_motion()
 
     def close(self) -> None:
-        api = self._api
-        command_fd = int(self._command_fd)
-        servo_fd = int(self._servo_fd)
+        errors = []
         session = self._session
-
         if session is not None:
             try:
                 session.stop_motion()
             except Exception as exc:
-                self._event(
-                    "warning",
-                    f"CR3A stop during close failed: {exc}",
-                )
-
-        self._session = None
-        self._message_callback = None
-        self._latest = None
-        self._command_fd = -1
-        self._servo_fd = -1
-
-        if api is not None:
-            self._disconnect_fds(api, command_fd, servo_fd)
+                errors.append(exc)
+        for attr in ("_command_fd", "_servo_fd"):
+            fd = getattr(self, attr)
+            if fd > 0:
+                try:
+                    self._api.disconnect_robot(fd)
+                except Exception as exc:
+                    errors.append(exc)
+                else:
+                    setattr(self, attr, -1)
+        if self._command_fd == -1 and self._servo_fd == -1:
+            self._session = None
+            self._message_callback = None
+            self._latest = None
+        if errors:
+            raise ExceptionGroup("CR3A shutdown incomplete", errors)
 
     @staticmethod
     def _disconnect_fds(
@@ -402,14 +423,15 @@ class Cr3aDevice:
         disconnect = getattr(api, "disconnect_robot", None)
         if disconnect is None:
             return
+        errors = []
         for fd in (command_fd, servo_fd):
             if int(fd) > 0:
                 try:
                     disconnect(int(fd))
-                except Exception:
-                    # Connection rollback/close must make a best effort to close
-                    # both descriptors even if one disconnect call fails.
-                    pass
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("NRC connection rollback incomplete", errors)
 
     def _require_session(self) -> NrcRobotSession:
         session = self._session

@@ -312,7 +312,7 @@ class O6Device:
             with self._lock:
                 if not self._error:
                     self._error = f"O6 通信线程无法退出（阶段={self._phase}）"
-            return
+            raise TimeoutError(self._error)
 
         self._thread = None
 

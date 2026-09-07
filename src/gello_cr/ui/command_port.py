@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -41,6 +42,10 @@ class CommandPortError(RuntimeError):
 
 
 class CommandPortClosed(CommandPortError):
+    pass
+
+
+class CommandAlreadyPending(CommandPortError):
     pass
 
 
@@ -116,6 +121,7 @@ class AsyncApplicationCommandPort:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._closed = False
+        self._pending: set[Command] = set()
 
         self._normal_thread = threading.Thread(
             target=self._worker,
@@ -137,6 +143,11 @@ class AsyncApplicationCommandPort:
         with self._lock:
             return self._closed
 
+    @property
+    def pending_commands(self) -> frozenset[Command]:
+        with self._lock:
+            return frozenset(self._pending)
+
     def submit(self, request: CommandRequest) -> None:
         if not isinstance(request, CommandRequest):
             raise TypeError("request must be CommandRequest")
@@ -145,6 +156,8 @@ class AsyncApplicationCommandPort:
             if self._closed:
                 raise CommandPortClosed("command port is closed")
 
+            if request.command in self._pending:
+                raise CommandAlreadyPending(f"{request.command.name} is already pending")
             target = (
                 self._safety_queue
                 if request.command in _SAFETY_COMMANDS
@@ -152,6 +165,7 @@ class AsyncApplicationCommandPort:
             )
             try:
                 target.put_nowait(request)
+                self._pending.add(request.command)
             except queue.Full as exc:
                 lane = (
                     "safety"
@@ -182,8 +196,12 @@ class AsyncApplicationCommandPort:
                     try:
                         callback(request, exc)
                     except Exception:
-                        pass
+                        logging.getLogger(__name__).exception("Command error callback failed")
+                else:
+                    logging.getLogger(__name__).error("%s failed: %s", request.command.name, exc)
             finally:
+                with self._lock:
+                    self._pending.discard(request.command)
                 work_queue.task_done()
 
     def close(self, timeout: float = 1.0) -> None:
@@ -202,14 +220,15 @@ class AsyncApplicationCommandPort:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
 
-    @staticmethod
     def _discard_pending(
-        work_queue: queue.Queue[CommandRequest],
+        self, work_queue: queue.Queue[CommandRequest],
     ) -> None:
         while True:
             try:
-                work_queue.get_nowait()
+                request = work_queue.get_nowait()
             except queue.Empty:
                 return
             else:
+                with self._lock:
+                    self._pending.discard(request.command)
                 work_queue.task_done()

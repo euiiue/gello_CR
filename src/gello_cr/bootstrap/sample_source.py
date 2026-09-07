@@ -91,8 +91,8 @@ class RecordingSampleSource:
                 self._wrist_rgb is not None
                 and self._base_rgb is not None
                 and self._base_roi_rgb is not None
-                and now - self._wrist_timestamp <= max_age
-                and now - self._base_timestamp <= max_age
+                and 0 <= now - self._wrist_timestamp <= max_age
+                and 0 <= now - self._base_timestamp <= max_age
                 and abs(self._wrist_timestamp - self._base_timestamp)
                 <= max_skew
             )

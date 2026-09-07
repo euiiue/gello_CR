@@ -17,6 +17,7 @@ from gello_cr.recording.schema import (
 def _sample() -> dict[str, object]:
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     return {
+        "timestamp": 10.0,
         "observation_state": [0.0] * 18,
         "action": [0.0] * 12,
         "image_base_rgb": image,

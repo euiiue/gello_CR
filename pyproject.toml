@@ -7,9 +7,11 @@ name = "gello-cr-teleop"
 version = "0.1.0"
 description = "Modular teleoperation and LeRobot data collection for GELLO/CR-class robots"
 requires-python = ">=3.12"
+dependencies = ["numpy>=1.26", "opencv-python>=4.8", "pyserial>=3.5"]
 
 [project.optional-dependencies]
-ui = ["PySide6>=6.7"]
+ui = ["PySide6-Essentials>=6.7"]
+data-validation = ["pyarrow>=15", "av>=12", "pandas>=2"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [tool.setuptools]
@@ -20,7 +22,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["tests", "test_teleop_runtime.py"]
 
 [tool.ruff]
 target-version = "py312"

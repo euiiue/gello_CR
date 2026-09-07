@@ -36,6 +36,8 @@ class WorkerDatasetService:
         self.buffered_frames = 0
         self.saved_episodes = 0
         self.image_shape = (0, 0, 3)
+        self.sample_metadata: list[dict[str, Any]] = []
+        self._finalized = False
 
     def handle_request(
         self,
@@ -124,6 +126,13 @@ class WorkerDatasetService:
                 f"{state.shape}/{action.shape}"
             )
 
+        if not np.isfinite(state).all() or not np.isfinite(action).all():
+            raise ValueError("State/action contains non-finite values")
+        if not str(request["task"]).strip():
+            raise ValueError("task cannot be empty")
+        metadata = dict(request.get("sample_metadata", {}))
+        # IPC is an external boundary: reject NaN/Inf before adding any frame.
+        json.dumps(metadata, allow_nan=False)
         frame = {
             LEROBOT_IMAGE_FEATURE_KEYS[index]: images[index]
             for index in range(len(LEROBOT_IMAGE_FEATURE_KEYS))
@@ -136,6 +145,7 @@ class WorkerDatasetService:
             }
         )
         self.dataset.add_frame(frame)
+        self.sample_metadata.append(metadata)
         self.buffered_frames += 1
         return {"ok": True, "frames": self.buffered_frames}
 
@@ -149,6 +159,11 @@ class WorkerDatasetService:
         collection_dir.mkdir(parents=True, exist_ok=True)
         collection = dict(request["collection"])
         collection["episode_index"] = self.saved_episodes
+        collection["frame_count"] = self.buffered_frames
+        collection["samples"] = self.sample_metadata
+        collection["image_streams"] = dict(zip(
+            ("Base RGB", "Wrist RGB", "Base ROI"), LEROBOT_IMAGE_FEATURE_KEYS
+        ))
         (
             collection_dir
             / f"episode_{self.saved_episodes:06d}.json"
@@ -157,6 +172,7 @@ class WorkerDatasetService:
                 collection,
                 ensure_ascii=False,
                 indent=2,
+                allow_nan=False,
             )
             + "\n",
             encoding="utf-8",
@@ -165,12 +181,14 @@ class WorkerDatasetService:
         self.dataset.save_episode()
         self.saved_episodes += 1
         self.buffered_frames = 0
+        self.sample_metadata = []
         return {"ok": True, "episodes": self.saved_episodes}
 
     def _clear_episode(self) -> dict[str, Any]:
         if self.dataset is not None and self.buffered_frames:
             self.dataset.clear_episode_buffer()
         self.buffered_frames = 0
+        self.sample_metadata = []
         return {"ok": True}
 
     def _finalize(self) -> dict[str, Any]:
@@ -180,12 +198,13 @@ class WorkerDatasetService:
                     "Unsaved Episode; save or discard explicitly"
                 )
             self.dataset.finalize()
+            self._finalized = True
         return {"ok": True, "episodes": self.saved_episodes}
 
     def finalize_best_effort(self) -> None:
         """Preserve the legacy worker-finally cleanup behavior."""
 
-        if self.dataset is not None:
+        if self.dataset is not None and not self._finalized:
             try:
                 self.dataset.finalize()
             except Exception:

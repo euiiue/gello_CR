@@ -158,5 +158,10 @@ class WorkerClient:
                     self._process.kill()
                     self._process.wait(timeout=2.0)
 
+        thread = self._stderr_thread
+        if thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                raise WorkerClientError("LeRobot stderr thread did not stop")
         if self._process.stderr is not None:
             self._process.stderr.close()

@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         from gello_cr.ui.session import create_operator_window
 
         qt_app = QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
-        window = create_operator_window(operator.backend)
+        window = create_operator_window(operator.backend, close_callback=operator.close)
 
         dataset_cfg = operator.runtime.store.data["dataset"]
         window.task_edit.setText(str(dataset_cfg["task"]))

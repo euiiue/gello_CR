@@ -182,17 +182,22 @@ class RealSenseRgbDevice:
             thread.join(timeout=2.0)
 
         pipeline = self._pipeline
-        self._pipeline = None
-        self._thread = None
-
+        errors = []
         if pipeline is not None:
             try:
                 pipeline.stop()
-            except Exception:
-                pass
-
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._pipeline = None
+        if thread is not None and thread.is_alive():
+            errors.append(TimeoutError("RealSense polling thread did not exit"))
+        else:
+            self._thread = None
         with self._lock:
             self._latest = None
+        if errors:
+            raise ExceptionGroup("RealSense shutdown incomplete", errors)
 
     def _set_error(self, message: str) -> None:
         with self._lock:

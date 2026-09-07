@@ -26,6 +26,9 @@ class Teleop:
 
 
 class Recorder:
+    def close(self):
+        pass
+
     def snapshot(self):
         return {
             "session_active": False,
@@ -84,6 +87,9 @@ class Runtime:
     sample_source: object
     cr3a_lifecycle: object
     store: object
+
+    def close(self):
+        pass
 
     @property
     def lifecycle(self):

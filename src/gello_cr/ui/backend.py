@@ -86,6 +86,7 @@ class OperatorBackend:
         lifecycle: RuntimeLifecycleCallbacks,
         readiness_snapshot: SnapshotSource | None = None,
         preview_snapshot: SnapshotSource | None = None,
+        episode_metadata: Mapping[str, Any] | None = None,
         event_capacity: int = 256,
         normal_command_capacity: int = 32,
         safety_command_capacity: int = 8,
@@ -101,6 +102,9 @@ class OperatorBackend:
             teleop_engine=teleop_engine,
             recorder=recorder,
             lifecycle=lifecycle,
+            recording_snapshot=recorder.snapshot,
+            episode_metadata=episode_metadata,
+            readiness_snapshot=readiness_snapshot,
         ).install()
 
         runtime_fault_bridge = RuntimeFaultSnapshotBridge(

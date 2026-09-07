@@ -4270,7 +4270,7 @@ class TeleopEngine:
         self._set_state("fault", message)
         self._event("error", message)
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, close_devices: bool = True) -> None:
         self._shutdown_requested.set()
         with self._state_lock:
             self._stop_generation += 1
@@ -4279,21 +4279,31 @@ class TeleopEngine:
             self._hand_action_stop.set()
             self._record_stop.set()
             self._replay_stop.set()
-        self.stop_follow("程序退出")
+        errors = []
+        try:
+            self.stop_follow("程序退出")
+        except Exception as exc:
+            errors.append(exc)
         if self.robot is not None:
             try:
                 self.robot.stop_motion()
-            except Exception:
-                pass
-        preset_thread = self._preset_thread
-        if preset_thread is not None and preset_thread is not threading.current_thread():
-            preset_thread.join(timeout=2.0)
-        for thread in (self._record_thread, self._replay_thread):
+            except Exception as exc:
+                errors.append(exc)
+        for thread in (self._preset_thread, self._record_thread,
+                       self._replay_thread):
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=3.0)
-        self.o6.close()
-        self.roarm.close(hold=True)
+                if thread.is_alive():
+                    errors.append(TimeoutError(f"Thread did not stop: {thread.name}"))
+        if close_devices:
+            for close in (self.o6.close, lambda: self.roarm.close(hold=True)):
+                try:
+                    close()
+                except Exception as exc:
+                    errors.append(exc)
         self._set_state("closed")
+        if errors:
+            raise ExceptionGroup("Teleop shutdown incomplete", errors)
 
     def dataset_sample(self) -> dict[str, Any]:
         """Read a bounded-age state/action sample (not hardware synchronized).

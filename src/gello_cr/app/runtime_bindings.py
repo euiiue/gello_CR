@@ -46,7 +46,13 @@ class RuntimeCommandBindings:
         teleop_engine: Any,
         recorder: Any,
         lifecycle: RuntimeLifecycleCallbacks | None = None,
+        readiness_snapshot: Callable[[], Mapping[str, Any]] | None = None,
+        recording_snapshot: Callable[[], Mapping[str, Any]] | None = None,
+        episode_metadata: Mapping[str, Any] | None = None,
     ) -> None:
+        self.recording_snapshot = recording_snapshot
+        self.episode_metadata = dict(episode_metadata or {})
+        self.readiness_snapshot = readiness_snapshot
         self.service = service
         self.teleop_engine = teleop_engine
         self.recorder = recorder
@@ -107,7 +113,18 @@ class RuntimeCommandBindings:
             Command.DISCONNECT,
         )()
 
+    def _require_readiness(self, *, cameras: bool = False) -> None:
+        if self.readiness_snapshot is None:
+            return  # Legacy binding keeps its existing runtime validation.
+        ready = self.readiness_snapshot()
+        if cameras:
+            if ready["camera_error"] or not ready["camera_frames_ready"]:
+                raise RuntimeError("Camera frames are stale/unavailable: " + ready["camera_error"])
+        elif not (ready["master_connected"] and ready["o6_connected"]):
+            raise RuntimeError("GELLO/master and O6 must be ready before this command")
+
     def _power_on(self, _payload: Mapping[str, Any]) -> Any:
+        self._require_readiness()
         return self._require_callback(
             self.lifecycle.power_on,
             Command.POWER_ON,
@@ -120,6 +137,7 @@ class RuntimeCommandBindings:
         )()
 
     def _start_teleop(self, _payload: Mapping[str, Any]) -> Any:
+        self._require_readiness()
         return self.teleop_engine.start_follow()
 
     def _stop_teleop(self, payload: Mapping[str, Any]) -> Any:
@@ -129,6 +147,7 @@ class RuntimeCommandBindings:
         return self.teleop_engine.stop_follow(reason)
 
     def _start_episode(self, payload: Mapping[str, Any]) -> Any:
+        self._require_readiness(cameras=True)
         task = self._required_text(payload, "task")
         base_root = self._required_text(payload, "base_root")
         metadata = payload.get("metadata")
@@ -137,7 +156,7 @@ class RuntimeCommandBindings:
         return self.recorder.start_episode(
             task,
             base_root,
-            metadata=dict(metadata or {}),
+            metadata={**self.episode_metadata, **dict(metadata or {})},
         )
 
     def _stop_episode(self, _payload: Mapping[str, Any]) -> Any:
@@ -172,13 +191,21 @@ class RuntimeCommandBindings:
         ).strip() or "软件紧急停止"
         return self.teleop_engine.emergency_stop(reason)
 
+    def _require_episode_resolved(self) -> None:
+        if self.recording_snapshot is not None:
+            episode = self.recording_snapshot()
+            if episode.get("episode_active") or episode.get("buffered_frames", 0):
+                raise RuntimeError("Episode 未处理；复位前请先保存失败或明确丢弃")
+
     def _reset_fault(self, _payload: Mapping[str, Any]) -> Any:
+        self._require_episode_resolved()
         return self._require_callback(
             self.lifecycle.reset_fault,
             Command.RESET_FAULT,
         )()
 
     def _reset_estop(self, _payload: Mapping[str, Any]) -> Any:
+        self._require_episode_resolved()
         return self._require_callback(
             self.lifecycle.reset_estop,
             Command.RESET_ESTOP,
