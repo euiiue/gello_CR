@@ -42,6 +42,11 @@ LeRobot 在 `dataset.worker_python` 指定的独立环境中运行。
 
 ## 配置与数据含义
 
+启动后、连接设备前，可点击右上角 **⚙ 设置**，分组编辑机械臂速度与保护、
+GELLO 参数、O6 动作库及开合选择、数采相机和控制器连接参数。
+保存会备份原配置，**关闭并重启程序后生效**；完整说明见
+[操作台参数设置](docs/OPERATOR_SETTINGS.md)。
+
 配置文件：`config/roarm_cr5_teleop.json`。本轮没有修改机器人参数或标定。
 部署到其他目录前检查 `gello.software_root`、`gello.kinematics_urdf`、串口 by-id、
 相机序列号、数据根目录和 worker_python。当前两个 GELLO 资源路径仍指向原工作区，

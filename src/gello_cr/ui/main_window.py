@@ -41,10 +41,13 @@ class OperatorMainWindow(QMainWindow):
         *,
         refresh_ms: int = 100,
         close_callback=None,
+        settings_factory=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._close_callback = close_callback
+        self._settings_factory = settings_factory
+        self._settings_restart_required = False
         self._presenter = presenter
         self._command_port = command_port
         self._last_preview_timestamps = (-1.0, -1.0)
@@ -99,7 +102,27 @@ class OperatorMainWindow(QMainWindow):
             lambda: self._submit(Command.EMERGENCY_STOP)
         )
         row.addWidget(self.estop_button)
+        self.settings_button = QPushButton("⚙ 设置")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.setAccessibleName("打开参数设置")
+        self.settings_button.clicked.connect(self._open_settings)
+        row.addWidget(self.settings_button)
         return widget
+
+    def _open_settings(self) -> None:
+        from .settings_dialog import OperatorSettingsDialog
+
+        try:
+            dialog = OperatorSettingsDialog(self._settings_factory(), self)
+        except (ValueError, OSError, RuntimeError) as exc:
+            traceback.print_exception(exc)
+            QMessageBox.critical(self, "无法打开设置", str(exc))
+            return
+        dialog.exec()
+        if dialog.saved:
+            self._settings_restart_required = True
+            self.event_log.appendPlainText("参数已保存，原配置已备份为 .json.bak；下次启动生效。")
+            self.refresh_from_presenter()
 
     def _make_status_card(
         self,
@@ -366,6 +389,16 @@ class OperatorMainWindow(QMainWindow):
             frame.readiness,
             frame.view_model,
         )
+        self.settings_button.setEnabled(
+            self._settings_factory is not None
+            and frame.view_model.workflow_state is WorkflowState.OFFLINE
+            and not frame.view_model.episode_active
+            and not frame.view_model.episode_pending
+            and not frame.readiness.cameras_running
+            and not frame.readiness.master_connected
+            and not frame.readiness.o6_connected
+        )
+        self.settings_button.setToolTip("请在启动后、连接设备与相机前设置；保存后下次启动生效。")
         pending = getattr(self._command_port, "pending_commands", frozenset())
         if pending:
             for button in self.findChildren(QPushButton):
@@ -374,6 +407,10 @@ class OperatorMainWindow(QMainWindow):
             self.statusBar().showMessage("BUSY · " + ", ".join(sorted(c.name for c in pending)))
         else:
             self.statusBar().clearMessage()
+        if self._settings_restart_required:
+            self.workflow_detail.setText("参数已保存 · 请关闭并重新启动程序后连接设备")
+            self.connect_button.setEnabled(False)
+            self.start_cameras_button.setEnabled(False)
         self.render_preview(frame.preview)
         for event in frame.events:
             self.append_event(event)

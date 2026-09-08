@@ -27,7 +27,9 @@ def test_runtime_imports_hand_mapping_in_both_paths() -> None:
 
 def test_joint_mode_uses_binary_mapper() -> None:
     source = _method_source("_gello_follow_loop")
-    assert "hand_action = binary_o6_action(master.gripper)" in source
+    assert "hand_action = binary_o6_action(" in source
+    assert 'open_action=o6_cfg["open_action"]' in source
+    assert 'closed_action=o6_cfg["closed_action"]' in source
     assert 'self.o6.set_target(o6_cfg["actions"][hand_action])' in source
     assert '"抓取" if float(master.gripper) >= 0.5 else "张开手"' not in source
 

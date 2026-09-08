@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+from gello_cr.app.settings import OperatorSettings
 from gello_cr.bootstrap import build_operator_application
 from gello_cr.core.state_machine import WorkflowState
 
@@ -88,7 +89,13 @@ def main(argv: list[str] | None = None) -> int:
         from gello_cr.ui.session import create_operator_window
 
         qt_app = QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
-        window = create_operator_window(operator.backend, close_callback=operator.close)
+        window = create_operator_window(
+            operator.backend,
+            close_callback=operator.close,
+            settings_factory=lambda: OperatorSettings(
+                operator.runtime.store.path, type(operator.runtime.store)
+            ),
+        )
 
         dataset_cfg = operator.runtime.store.data["dataset"]
         window.task_edit.setText(str(dataset_cfg["task"]))

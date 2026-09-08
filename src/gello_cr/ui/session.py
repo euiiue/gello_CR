@@ -11,6 +11,7 @@ def create_operator_window(
     *,
     refresh_ms: int = 100,
     close_callback=None,
+    settings_factory=None,
 ):
     """Return the PySide6 window without starting the GUI event loop or hardware."""
 
@@ -22,4 +23,5 @@ def create_operator_window(
         backend.command_port,
         refresh_ms=refresh_ms,
         close_callback=close_callback,
+        settings_factory=settings_factory,
     )

@@ -186,6 +186,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "command_deadband": 2,
         "feedback_timeout_s": 1.0,
         "action_timeout_s": 15.0,
+        "open_action": "张开手",
+        "closed_action": "抓取",
         "actions": {
             "张开手": [250, 250, 250, 250, 250, 250],
             "中指": [91, 132, 0, 250, 0, 0],
@@ -314,6 +316,10 @@ class TeleopConfigStore:
             except (OSError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"读取遥操作配置失败: {self.path}: {exc}") from exc
             data = _deep_merge(DEFAULT_CONFIG, loaded)
+            # An explicitly saved action library is complete; deleted actions
+            # must not reappear from defaults after restarting the editor.
+            if "actions" in loaded.get("o6", {}):
+                data["o6"]["actions"] = copy.deepcopy(loaded["o6"]["actions"])
             self._validate(data)
             return data
 
@@ -549,6 +555,9 @@ class TeleopConfigStore:
             if not isinstance(action_name, str) or not action_name.strip():
                 raise ValueError("O6 快捷动作名称不能为空")
             _six_uint8(target, f"O6 快捷动作 {action_name}")
+        for key in ("open_action", "closed_action"):
+            if data["o6"][key] not in actions:
+                raise ValueError(f"O6 {key} 必须引用已保存的动作")
         dataset = data["dataset"]
         if not str(dataset["root"]).strip():
             raise ValueError("LeRobot 数据集根目录不能为空")
@@ -2562,7 +2571,11 @@ class TeleopEngine:
                         "提交不等于执行确认",
                     )
 
-                hand_action = binary_o6_action(master.gripper)
+                hand_action = binary_o6_action(
+                    master.gripper,
+                    open_action=o6_cfg["open_action"],
+                    closed_action=o6_cfg["closed_action"],
+                )
                 if last_hand_action != hand_action:
                     self.o6.set_target(o6_cfg["actions"][hand_action])
                     last_hand_action = hand_action

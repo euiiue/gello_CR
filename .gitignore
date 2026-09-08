@@ -26,3 +26,6 @@
 
 # Project-local virtual environment.
 .venv/
+
+# Last configuration before saving from the parameter editor.
+/config/*.json.bak
