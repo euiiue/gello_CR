@@ -36,6 +36,7 @@ class Command(Enum):
     RESET_FAULT = auto()
     EMERGENCY_STOP = auto()
     RESET_ESTOP = auto()
+    HOME_COMPLETED = auto()
 
 
 class InvalidTransition(RuntimeError):
@@ -129,6 +130,12 @@ class WorkflowStateMachine:
     recovery_state: WorkflowState = WorkflowState.OFFLINE
 
     def can(self, command: Command) -> bool:
+        if command is Command.HOME_COMPLETED:
+            return self.state is not WorkflowState.OFFLINE
+        if self.state is WorkflowState.ROBOT_ENABLED and command in (
+            Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
+        ):
+            return True
         if command is Command.EMERGENCY_STOP:
             return self.state is not WorkflowState.ESTOP
         if command is Command.REPORT_FAULT:
@@ -159,6 +166,15 @@ class WorkflowStateMachine:
             raise InvalidTransition(
                 f"{command.name} is not allowed from {self.state.name}"
             )
+
+        if command is Command.HOME_COMPLETED:
+            self.state = WorkflowState.ROBOT_ENABLED
+            self.recovery_state = WorkflowState.ROBOT_ENABLED
+            return self.state
+        if self.state is WorkflowState.ROBOT_ENABLED and command in (
+            Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
+        ):
+            return self.state
 
         if command is Command.EMERGENCY_STOP:
             self.recovery_state = self._safe_recovery_state(self.state)

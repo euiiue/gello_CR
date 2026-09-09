@@ -21,7 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
@@ -1773,6 +1773,7 @@ class TeleopEngine:
         self.robot: Optional[NrcRobotAdapter] = None
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self._state_lock = threading.RLock()
+        self._home_lock = threading.Lock()
         self._state = "idle"
         self._last_error = ""
         self._stop_generation = 0
@@ -2023,6 +2024,8 @@ class TeleopEngine:
         _resume_from_replay: bool = False,
         _resume_from_preset: bool = False,
     ) -> None:
+        if self._home_lock.locked():
+            raise RuntimeError("HOME 回位正在执行")
         if self._shutdown_requested.is_set():
             raise RuntimeError("程序正在退出，禁止启动主从跟随")
         if self.robot is None:
@@ -3658,6 +3661,8 @@ class TeleopEngine:
         slot: int = 1,
     ) -> None:
         """Replay CR5/O6, optionally without interrupting an active Episode."""
+        if self._home_lock.locked():
+            raise RuntimeError("HOME 回位正在执行")
         slot_number = int(slot)
         self._replay_path(slot_number)
         insert_mode = bool(insert_into_episode)
@@ -4066,7 +4071,99 @@ class TeleopEngine:
             self.start_follow()
         return preset
 
+    def return_home(self, stop_recording: Callable[[], None]) -> None:
+        """Preempt motion, retain the Episode, then return only the robot to HOME.
+
+        Runs on a dedicated GUI worker; software stop can cancel it at any stage.
+        """
+        if not self._home_lock.acquire(blocking=False):
+            raise RuntimeError("HOME 回位正在执行")
+        robot = self.robot
+        try:
+            if robot is None or self.state == "closed":
+                raise RuntimeError("请先连接机械臂")
+            preset = self.store.data["presets"].get("HOME")
+            if preset is None:
+                raise RuntimeError("初始位 HOME 尚未保存")
+            target = [float(value) for value in preset["robot_joints_deg"]]
+            if len(target) != 7 or not all(math.isfinite(v) for v in target):
+                raise ValueError("HOME 关节目标必须是 7 个有限数值（含 SDK 占位轴）")
+            with self._state_lock:
+                self._stop_generation += 1
+                generation = self._stop_generation
+                self._follow_stop.set()
+                self._preset_stop.set()
+                self._replay_stop.set()
+                self._record_stop.set()
+                self._hand_action_stop.set()
+                self._replay_resume_follow = False
+                producers = (self._follow_thread, self._preset_thread,
+                             self._replay_thread, self._record_thread)
+                self._state = "recovering"
+            robot.stop_motion()
+            for thread in producers:
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(timeout=3.0)
+                    if thread.is_alive():
+                        raise TimeoutError(f"{thread.name} 未停止，禁止 HOME 回位")
+            stop_recording()
+            with self._state_lock:
+                if self._stop_generation != generation or self._shutdown_requested.is_set():
+                    raise RuntimeError("HOME 回位已被停止")
+                self._preset_thread = threading.current_thread()
+                self._preset_stop.clear()
+                self._state = "preset"
+            if not robot.wait_until_motion_stopped(5.0, stop_event=self._preset_stop):
+                raise RuntimeError("机械臂尚未停止或 HOME 已取消")
+            if robot.servo_state() != 3:
+                robot.power_on()
+            if robot.servo_state() != 3:
+                raise RuntimeError("HOME 回位使能失败")
+            if self._preset_stop.is_set() or self._stop_generation != generation:
+                raise RuntimeError("HOME 回位已被停止")
+            cfg = self.store.data["preset"]
+            self._event("info", "机械臂回 HOME：其他运动已停止，已录数据保留")
+            robot.movej(target, float(cfg["robot_velocity_percent"]),
+                        float(cfg["robot_acc_percent"]), float(cfg["robot_dec_percent"]))
+            deadline = time.monotonic() + float(cfg["timeout_s"])
+            while True:
+                if self._preset_stop.is_set() or self._stop_generation != generation:
+                    raise RuntimeError("HOME 回位已被停止")
+                current = robot.joint_position()
+                if max(abs(a - b) for a, b in zip(current[:6], target[:6])) <= 1.0:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("机械臂未在规定时间内到达 HOME")
+                self._preset_stop.wait(0.05)
+            robot.stop_motion()
+            if not robot.wait_until_motion_stopped(5.0, stop_event=self._preset_stop):
+                raise RuntimeError("HOME 到达后停止未确认")
+            if max(abs(a - b) for a, b in zip(robot.joint_position()[:6], target[:6])) > 1.0:
+                raise RuntimeError("机械臂停止后偏离 HOME")
+            with self._state_lock:
+                if self._stop_generation != generation or self._preset_stop.is_set():
+                    raise RuntimeError("HOME 回位已被停止")
+                self._state = "idle"
+                self._last_error = ""
+            self._event("info", "机械臂已回 HOME；保持停止，请手动重新启动跟随")
+        except Exception as exc:
+            if self.state != "closed":
+                self._set_state("fault", str(exc))
+            if robot is not None:
+                try:
+                    robot.stop_motion()
+                except Exception as stop_exc:
+                    raise ExceptionGroup("HOME 回位及停止失败", [exc, stop_exc]) from None
+            raise
+        finally:
+            with self._state_lock:
+                if self._preset_thread is threading.current_thread():
+                    self._preset_thread = None
+            self._home_lock.release()
+
     def recall_preset(self, name: str, resume_follow: bool = True) -> None:
+        if self._home_lock.locked():
+            raise RuntimeError("HOME 回位正在执行")
         key = name.upper()
         with self._state_lock:
             stop_generation = self._stop_generation

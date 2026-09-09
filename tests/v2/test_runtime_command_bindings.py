@@ -34,6 +34,32 @@ class FakeTeleop:
         return "estopped"
 
 
+@pytest.mark.parametrize("runtime_state", ["fault", "preset", "following"])
+def test_home_completion_cannot_clear_a_new_stop_or_active_motion(runtime_state):
+    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.ESTOP))
+    teleop = FakeTeleop()
+    teleop.state = runtime_state
+    RuntimeCommandBindings(service, teleop_engine=teleop, recorder=FakeRecorder()).install()
+    with pytest.raises(RuntimeError, match="HOME 完成状态"):
+        service.dispatch(Command.HOME_COMPLETED)
+    assert service.state is WorkflowState.ESTOP
+
+
+def test_home_completion_keeps_pending_data_and_never_restarts_follow():
+    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.RECORDING))
+    teleop = FakeTeleop()
+    teleop.state = "idle"
+    recorder = FakeRecorder()
+    RuntimeCommandBindings(service, teleop_engine=teleop, recorder=recorder).install()
+    service.dispatch(Command.HOME_COMPLETED)
+    assert service.state is WorkflowState.ROBOT_ENABLED
+    assert recorder.calls == []
+    assert teleop.calls == []
+    service.dispatch(Command.SAVE_FAILURE)
+    assert service.state is WorkflowState.ROBOT_ENABLED
+    assert teleop.calls == []
+
+
 class FakeRecorder:
     def __init__(self):
         self.calls = []

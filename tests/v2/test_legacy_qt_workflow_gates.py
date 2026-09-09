@@ -1,9 +1,32 @@
 from __future__ import annotations
 
 import ast
+from types import SimpleNamespace
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / "TEST_INEXBOT.py"
+
+
+def test_home_click_schedules_worker_without_waiting_for_robot_or_episode():
+    namespace = {}
+    exec(compile(_method("TeleopGoHome"), str(SOURCE), "exec"), namespace)
+    jobs = []
+    calls = []
+    ui = SimpleNamespace(
+        robot1_connected=True,
+        _run_teleop_async=lambda name, work: jobs.append((name, work)),
+        _return_robot_home=lambda: calls.append("home"),
+        _teleop_event=lambda *args: calls.append(args),
+    )
+    namespace["TeleopGoHome"](ui)
+    assert len(jobs) == 1
+    assert calls == []
+    jobs[0][1]()
+    assert calls == ["home"]
+    ui.robot1_connected = False
+    namespace["TeleopGoHome"](ui)
+    assert len(jobs) == 1
+    assert calls[-1] == ("error", "请先连接机械臂")
 
 
 def _source() -> str:

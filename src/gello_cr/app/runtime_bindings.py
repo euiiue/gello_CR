@@ -75,6 +75,7 @@ class RuntimeCommandBindings:
             Command.RESET_FAULT: self._reset_fault,
             Command.EMERGENCY_STOP: self._emergency_stop,
             Command.RESET_ESTOP: self._reset_estop,
+            Command.HOME_COMPLETED: self._home_completed,
         }
         for command, handler in handlers.items():
             self.service.set_handler(command, handler)
@@ -196,6 +197,10 @@ class RuntimeCommandBindings:
             episode = self.recording_snapshot()
             if episode.get("episode_active") or episode.get("buffered_frames", 0):
                 raise RuntimeError("Episode 未处理；复位前请先保存失败或明确丢弃")
+
+    def _home_completed(self, _payload: Mapping[str, Any]) -> None:
+        if self.teleop_engine.state != "idle":
+            raise RuntimeError("HOME 完成状态已被其他动作或停止覆盖")
 
     def _reset_fault(self, _payload: Mapping[str, Any]) -> Any:
         self._require_episode_resolved()

@@ -1672,9 +1672,9 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         home_group = QGroupBox("HOME / 采集")
         home_layout = QGridLayout(home_group)
         self.gello_page_save_home = QPushButton("保存当前为 HOME")
-        self.gello_page_go_home = QPushButton("CR3A / O6 回 HOME")
+        self.gello_page_go_home = QPushButton("机械臂回初始位 HOME")
         self.gello_page_save_home.setToolTip("点击后立即用当前姿态覆盖 HOME；必须先停止跟随并处理 Episode")
-        self.gello_page_go_home.setToolTip("点击后立即执行 HOME 回位；请先确认路径、工作区和硬件急停")
+        self.gello_page_go_home.setToolTip("停止其他运动及录制，保留已录数据，再回已保存的 HOME；仅需机械臂连接")
         self.gello_page_collection = QPushButton("进入数采工作台 →")
         self.gello_page_save_home.clicked.connect(self.TeleopSaveHome)
         self.gello_page_go_home.clicked.connect(self.TeleopGoHome)
@@ -2210,7 +2210,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         mode_row = QHBoxLayout()
         self.teleop_master_free_button = QPushButton("从臂保持 / 主臂自由")
         self.teleop_save_home_button = QPushButton("保存当前为初始位")
-        self.teleop_home_button = QPushButton("主从臂一键回初始位")
+        self.teleop_home_button = QPushButton("机械臂一键回初始位")
         self.teleop_master_free_button.setToolTip(
             "CR5 和 O6 保持当前位置，RoArm 全部卸力，可徒手拖动"
         )
@@ -2218,7 +2218,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
             "同时保存 RoArm、CR5 和 O6 当前位置为独立 HOME 初始位"
         )
         self.teleop_home_button.setToolTip(
-            "CR5 使用 MoveJ，RoArm 和 O6 同时回到已保存 HOME，到位后保持"
+            "停止其他运动及录制，保留已录数据；机械臂使用 MoveJ 回到已保存 HOME"
         )
         self.teleop_master_free_button.clicked.connect(self.TeleopMasterFree)
         self.teleop_save_home_button.clicked.connect(self.TeleopSaveHome)
@@ -2955,13 +2955,17 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         )
 
     def TeleopGoHome(self):
-        if self.teleop_engine.state not in ("idle", "fault", "following", "master_free"):
-            self._teleop_event("error", "当前状态不允许回 HOME")
+        if not self.robot1_connected:
+            self._teleop_event("error", "请先连接机械臂")
             return
-        try:
-            self.teleop_engine.recall_preset("HOME", resume_follow=False)
-        except Exception as exc:
-            self._teleop_event("error", f"主从臂回初始位失败: {exc}")
+        self._run_teleop_async(
+            "机械臂回 HOME",
+            self._return_robot_home,
+        )
+
+    def _return_robot_home(self):
+        self.teleop_engine.return_home(self.lerobot_recorder.stop_episode)
+        self.app_service.dispatch(Command.HOME_COMPLETED)
 
     def TeleopSavePreset(self, name):
         self._run_teleop_async(
@@ -3251,13 +3255,9 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self.gello_page_stop.setEnabled(moving or starting)
         self.gello_page_estop.setEnabled(True)
         self.gello_page_save_home.setEnabled(ready and not settings_locked)
-        self.gello_page_go_home.setEnabled(ready and "HOME" in snapshot["presets"] and not settings_locked)
-        self.workflow_home_button.setEnabled(
-            ready
-            and "HOME" in snapshot["presets"]
-            and state in ("idle", "fault", "following", "master_free")
-            and not episode_busy
-        )
+        self.gello_page_go_home.setEnabled(self.robot1_connected)
+        self.workflow_home_button.setEnabled(self.robot1_connected)
+        self.teleop_home_button.setEnabled(self.robot1_connected)
         self.gello_page_clear_error.setEnabled(self.robot1_connected and not self._workflow_power_starting)
         self.workflow_prepare_button.setEnabled(not settings_locked and not connecting and not self._workflow_prepare_active)
         self.teleop_robot_ip.setReadOnly(self.robot1_connected or connecting)
@@ -3366,8 +3366,8 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         self.workflow_estop_button = self.gello_page_estop
         self.workflow_home_button = QPushButton("一键回 HOME")
         self.workflow_home_button.setToolTip(
-            "直接接替当前 GELLO 遥操作：先停止跟随，再执行已保存的 HOME 回位；"
-            "录制中的 Episode 会持续记录 HOME 回位过程。"
+            "优先停止跟随／回放及录制，保留已录数据，再执行机械臂 HOME 回位；"
+            "仅需机械臂连接，未使能时尝试使能，到位后不恢复跟随。"
         )
         self.workflow_home_button.clicked.connect(self.TeleopGoHome)
         self.workflow_clear_error_button = self.gello_page_clear_error

@@ -79,6 +79,7 @@ def workflow_ui_policy(
             state
             in (
                 WorkflowState.RECORDING,
+                WorkflowState.ROBOT_ENABLED,
                 WorkflowState.FAULT,
                 WorkflowState.ESTOP,
             )
@@ -89,6 +90,7 @@ def workflow_ui_policy(
             state
             in (
                 WorkflowState.RECORDING,
+                WorkflowState.ROBOT_ENABLED,
                 WorkflowState.FAULT,
                 WorkflowState.ESTOP,
             )
