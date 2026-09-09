@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from gello_cr.data_contract import ACTION_DIM, IMAGE_SIZE, STATE_DIM
+from gello_cr.data_contract import ACTION_DIM, IMAGE_SIZE, recording_fields
 
 from .protocol import receive_packet, send_packet
 from .schema import LEROBOT_IMAGE_FEATURE_KEYS, dataset_features
@@ -75,6 +75,8 @@ class WorkerDatasetService:
         if (height, width) != tuple(IMAGE_SIZE):
             raise ValueError("PI0.5 recording image size must be 224x224")
 
+        self.recording_mode = request.get("recording_mode", "tcp")
+        self.state_fields, _ = recording_fields(self.recording_mode)
         encoder = self._encoder_factory(
             vcodec="h264",
             pix_fmt="yuv420p",
@@ -86,8 +88,8 @@ class WorkerDatasetService:
             repo_id=str(request["repo_id"]),
             root=root,
             fps=fps,
-            robot_type="dobot_cr5_o6",
-            features=dataset_features(height, width),
+            robot_type="dobot_cr3_o6" if self.recording_mode == "joint" else "dobot_cr5_o6",
+            features=dataset_features(height, width, self.recording_mode),
             use_videos=True,
             rgb_encoder=encoder,
             streaming_encoding=True,
@@ -106,6 +108,8 @@ class WorkerDatasetService:
         if self.dataset is None:
             raise RuntimeError("Dataset is not initialized")
 
+        if request.get("recording_mode", "tcp") != self.recording_mode:
+            raise ValueError("Recording mode differs from dataset session")
         expected_per_image = int(np.prod(self.image_shape))
         expected = expected_per_image * len(LEROBOT_IMAGE_FEATURE_KEYS)
         if len(raw) != expected:
@@ -120,7 +124,7 @@ class WorkerDatasetService:
         state = np.asarray(request["state"], dtype=np.float32)
         action = np.asarray(request["action"], dtype=np.float32)
 
-        if state.shape != (STATE_DIM,) or action.shape != (ACTION_DIM,):
+        if state.shape != (len(self.state_fields),) or action.shape != (ACTION_DIM,):
             raise ValueError(
                 f"Invalid state/action shapes: "
                 f"{state.shape}/{action.shape}"
@@ -158,6 +162,7 @@ class WorkerDatasetService:
         collection_dir = Path(self.dataset.root) / "meta" / "collection"
         collection_dir.mkdir(parents=True, exist_ok=True)
         collection = dict(request["collection"])
+        collection["recording_mode"] = self.recording_mode
         collection["episode_index"] = self.saved_episodes
         collection["frame_count"] = self.buffered_frames
         collection["samples"] = self.sample_metadata

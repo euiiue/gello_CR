@@ -1,4 +1,4 @@
-"""Frozen recording schema helpers for the LeRobot/OpenPI bridge."""
+"""Selectable recording schemas for the LeRobot worker boundary."""
 
 from __future__ import annotations
 
@@ -7,12 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from gello_cr.data_contract import (
-    ACTION_DIM,
-    ACTION_FIELDS,
-    STATE_DIM,
-    STATE_FIELDS,
-)
+from gello_cr.data_contract import ACTION_DIM, recording_fields
 
 SAMPLE_IMAGE_KEYS = (
     "image_base_rgb",
@@ -28,6 +23,8 @@ LEROBOT_IMAGE_FEATURE_KEYS = (
 
 
 def validate_recording_sample(sample: Mapping[str, Any]) -> None:
+    state_fields, _ = recording_fields(sample.get("recording_mode", "tcp"))
+    state_dim = len(state_fields)
     state = sample["observation_state"]
     action = sample["action"]
 
@@ -41,9 +38,9 @@ def validate_recording_sample(sample: Mapping[str, Any]) -> None:
         if not np.isfinite(image).all():
             raise ValueError(f"Camera RGB frame {image_key} contains non-finite values")
 
-    if np.asarray(state).shape != (STATE_DIM,):
+    if np.asarray(state).shape != (state_dim,):
         raise ValueError(
-            f"observation.state must have {STATE_DIM} values, got {len(state)}"
+            f"observation.state must have {state_dim} values, got {len(state)}"
         )
     if np.asarray(action).shape != (ACTION_DIM,):
         raise ValueError(
@@ -61,7 +58,8 @@ def validate_recording_sample(sample: Mapping[str, Any]) -> None:
         raise ValueError("State/action contains non-finite values")
 
 
-def dataset_features(height: int, width: int) -> dict[str, dict[str, Any]]:
+def dataset_features(height: int, width: int, recording_mode: str = "tcp") -> dict[str, dict[str, Any]]:
+    state_fields, action_fields = recording_fields(recording_mode)
     height_value = int(height)
     width_value = int(width)
     if height_value <= 0 or width_value <= 0:
@@ -70,13 +68,13 @@ def dataset_features(height: int, width: int) -> dict[str, dict[str, Any]]:
     features: dict[str, dict[str, Any]] = {
         "observation.state": {
             "dtype": "float32",
-            "shape": (STATE_DIM,),
-            "names": list(STATE_FIELDS),
+            "shape": (len(state_fields),),
+            "names": list(state_fields),
         },
         "action": {
             "dtype": "float32",
             "shape": (ACTION_DIM,),
-            "names": list(ACTION_FIELDS),
+            "names": list(action_fields),
         },
     }
 

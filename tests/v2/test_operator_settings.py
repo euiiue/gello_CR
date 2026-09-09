@@ -28,6 +28,7 @@ def test_save_round_trip_preserves_unedited_config_and_running_store(settings):
     candidate = copy.deepcopy(settings.data)
     candidate["robot"]["servoj_vmax"] = 45.0
     candidate["dataset"]["fps"] = 15
+    candidate["dataset"]["recording_mode"] = "joint"
     settings.save(candidate)
     reloaded = TeleopConfigStore(settings.path).data
     assert reloaded == candidate
@@ -47,6 +48,7 @@ def test_save_round_trip_preserves_unedited_config_and_running_store(settings):
         ("robot", "command_port", 65536),
         ("gello", "joint_scale", 1.6),
         ("dataset", "fps", 0),
+        ("dataset", "recording_mode", "invalid"),
         ("dataset", "camera_max_age_s", float("inf")),
         ("dataset", "base_roi_norm", [0.7, 0.1, 0.3, 0.9]),
         ("o6", "speed", [256] * 6),
@@ -184,6 +186,7 @@ def test_saving_new_session_reads_parameters_without_hardware(settings):
     candidate = copy.deepcopy(settings.data)
     candidate["robot"]["servoj_vmax"] = 45.0
     candidate["dataset"]["fps"] = 15
+    candidate["dataset"]["recording_mode"] = "joint"
     settings.save(candidate)
     config_dir = settings.path.parent / "config"
     config_dir.mkdir()
@@ -330,3 +333,13 @@ def test_running_joint_loop_dispatches_saved_action_to_fake_hand(
         assert expected in hand.targets
     finally:
         engine.stop_follow("offline test complete")
+
+
+def test_recording_mode_selector_round_trip(dialog, settings):
+    dialog, _app = dialog
+    dialog.recording_mode.setCurrentIndex(dialog.recording_mode.findData("joint"))
+    settings.save(dialog._candidate())
+    assert TeleopConfigStore(settings.path).data["dataset"]["recording_mode"] == "joint"
+    dialog.recording_mode.setCurrentIndex(dialog.recording_mode.findData("tcp"))
+    settings.save(dialog._candidate())
+    assert TeleopConfigStore(settings.path).data["dataset"]["recording_mode"] == "tcp"

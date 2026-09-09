@@ -937,6 +937,30 @@ class TeleopEngineTests(unittest.TestCase):
         self.assertFalse(self.robot.servoj_open)
         self.assertEqual(self.engine.state, "idle")
 
+    def test_joint_dataset_records_feedback_and_sent_absolute_targets_in_radians(self):
+        self.store.data["dataset"]["recording_mode"] = "joint"
+        self.store.data["gello"]["control_mode"] = "joint"
+        self.master.master_type = "gello"
+        self.engine._set_state("following")
+        now = time.monotonic()
+        actual = [0, 90, -90, 180, -180, 45]
+        target = [10, 100, -80, 190, -170, 55, 0]
+        self.engine._gello_telemetry = {
+            "sent_count": 1, "feedback_at": now, "command_at": now,
+            "tracking_error_deg": 10, "actual_deg": actual,
+            "target_full_deg": target,
+        }
+        sample = self.engine.dataset_sample()
+        self.assertEqual(sample["recording_mode"], "joint")
+        self.assertEqual(len(sample["observation_state"]), 12)
+        for result, degrees in zip(sample["observation_state"][:6], actual):
+            self.assertAlmostEqual(result, math.radians(degrees))
+        for result, degrees in zip(sample["action"][:6], target):
+            self.assertAlmostEqual(result, math.radians(degrees))
+        self.engine._set_state("idle")
+        with self.assertRaisesRegex(RuntimeError, "已下发目标"):
+            self.engine.dataset_sample()
+
     def test_dataset_tcp_rpy_uses_native_rad_and_shortest_delta(self):
         self.robot.tcp = [500.0, 10.0, 300.0, 3.10, -3.10, 0.25, 0.0]
         self.engine._set_dataset_target_tcp(

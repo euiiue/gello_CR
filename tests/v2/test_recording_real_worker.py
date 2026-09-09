@@ -12,13 +12,14 @@ from gello_cr.recording.episode_recorder import LeRobotEpisodeRecorder
 from gello_cr.recording.validate_dataset import validate_dataset
 
 
-def test_real_worker_success_failure_discard_and_finalize(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode,state_dim", [("tcp", 18), ("joint", 12)])
+def test_real_worker_success_failure_discard_and_finalize(tmp_path, monkeypatch, mode, state_dim):
     monkeypatch.setenv('HF_HUB_OFFLINE', '1')
     monkeypatch.setenv('HF_DATASETS_OFFLINE', '1')
     image = np.full((224,224,3), 90, dtype=np.uint8)
     def sample():
         ts = time.monotonic()
-        return {'timestamp': ts, 'observation_state': [0.0]*18, 'action': [0.0]*12,
+        return {'timestamp': ts, 'recording_mode': mode, 'observation_state': [0.0]*state_dim, 'action': [0.0]*12,
                 'image_base_rgb': image, 'image_wrist_rgb': image, 'image_roi_rgb': image,
                 'quality': {'wrist_timestamp': ts, 'base_timestamp': ts,
                             'wrist_age_s': 0., 'base_age_s': 0., 'camera_skew_s': 0.}}

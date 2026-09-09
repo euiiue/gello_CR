@@ -44,6 +44,7 @@ class LeRobotEpisodeRecorder:
         self._lock = threading.RLock()
         self._client: Optional[WorkerClient] = None
         self._session_root = ""
+        self._recording_mode = "tcp"
         self._repo_id = ""
         self._episode_thread: Optional[threading.Thread] = None
         self._episode_stop = threading.Event()
@@ -86,6 +87,7 @@ class LeRobotEpisodeRecorder:
             response = client.request(
                 {
                     "op": "init",
+                    "recording_mode": self._recording_mode,
                     "repo_id": repo_id,
                     "root": str(session_root),
                     "fps": self.fps,
@@ -119,6 +121,10 @@ class LeRobotEpisodeRecorder:
         # Validate hardware and camera before creating a dataset directory.
         first_sample = self.sample_provider()
         self._validate_sample(first_sample)
+        mode = first_sample.get("recording_mode", "tcp")
+        if self._client is not None and mode != self._recording_mode:
+            raise WorkerClientError("切换记录模式前请先结束当前数据集")
+        self._recording_mode = mode
         self._ensure_session(base_root)
         # Worker imports/encoder setup can take seconds. Never record the
         # preflight frame with an action captured before that initialization.

@@ -82,6 +82,14 @@ class OperatorSettingsDialog(QDialog):
             form = QFormLayout()
             form.setVerticalSpacing(12)
             form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            if name == "数采与相机":
+                self.recording_mode = QComboBox()
+                self.recording_mode.addItem("TCP 位姿（m / rad）＋ TCP 差值动作", "tcp")
+                self.recording_mode.addItem("CR3 关节 q1–q6（rad）＋绝对关节目标", "joint")
+                self.recording_mode.setCurrentIndex(
+                    self.recording_mode.findData(settings.data["dataset"]["recording_mode"])
+                )
+                form.addRow("LeRobot 记录模式", self.recording_mode)
             for field in fields:
                 section, key = field.path.split(".")
                 value = settings.data[section][key]
@@ -221,6 +229,7 @@ class OperatorSettingsDialog(QDialog):
                 candidate[section][key] = field.parse(
                     [edit.text() for edit in self.editors[field.path]]
                 )
+        candidate["dataset"]["recording_mode"] = self.recording_mode.currentData()
         actions = {}
         for row in range(self.actions_table.rowCount()):
             name = self.actions_table.item(row, 0).text().strip()

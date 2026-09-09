@@ -234,6 +234,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_joint_speed_deg_s": 120.0,
     },
     "dataset": {
+        "recording_mode": "tcp",
         "root": "/home/ace/datasets/cr5_o6_low_latency_test",
         "repo_prefix": "ace/cr5_o6",
         "task": "Pick up the object and place it in the target container.",
@@ -559,6 +560,8 @@ class TeleopConfigStore:
             if data["o6"][key] not in actions:
                 raise ValueError(f"O6 {key} 必须引用已保存的动作")
         dataset = data["dataset"]
+        if dataset["recording_mode"] not in ("tcp", "joint"):
+            raise ValueError("记录模式必须是 tcp 或 joint")
         if not str(dataset["root"]).strip():
             raise ValueError("LeRobot 数据集根目录不能为空")
         repo_prefix = str(dataset["repo_prefix"]).strip()
@@ -4325,7 +4328,9 @@ class TeleopEngine:
         joints in radians, TCP XYZ+RPY in metres/radians, then six raw O6
         positions.  The action is the shortest TCP delta from current feedback
         to the last command sent by follow/preset/replay plus the last O6 RS485
-        target. SDK send success is not a controller execution acknowledgement.
+        target. Joint mode records six feedback joints and six absolute sent
+        joint targets in radians, each followed by O6 values. It requires active
+        GELLO joint following. SDK success is not an execution acknowledgement.
         """
         state = self.state
         if state == "closed":
@@ -4335,6 +4340,7 @@ class TeleopEngine:
             raise RuntimeError("CR5 连接已丢失")
 
         sample_started_at = time.monotonic()
+        recording_mode = self.store.data["dataset"]["recording_mode"]
         gello_joint_follow = (
             self.master_type == "gello" and state == "following"
             and self.store.data["gello"]["control_mode"] == "joint"
@@ -4344,6 +4350,10 @@ class TeleopEngine:
             target_tcp = self._dataset_target_tcp_controller
             action_timestamp = self._dataset_action_timestamp
         quality = {}
+        if recording_mode == "joint" and (
+            not gello_joint_follow or telemetry is None or not telemetry["sent_count"]
+        ):
+            raise RuntimeError("关节记录需要 GELLO 关节跟随及已下发目标；请先启动关节跟随")
         if gello_joint_follow and (telemetry is None or not telemetry["sent_count"]):
             quality["gello_telemetry_missing"] = 1.0
             gello_joint_follow = False
@@ -4380,7 +4390,8 @@ class TeleopEngine:
                     desired_error > tracking_limit
                 )
             joints = list(telemetry["actual_deg"])
-            target_tcp = robot.forward_kinematics(telemetry["target_full_deg"])
+            if recording_mode == "tcp":
+                target_tcp = robot.forward_kinematics(telemetry["target_full_deg"])
             quality["validated_target_age_s"] = sample_started_at - validated_at
             quality["pending_target_deg"] = pending_target_deg
             action_timestamp = effective_action_at
@@ -4432,15 +4443,21 @@ class TeleopEngine:
             + [float(value) for value in o6_position]
         )
 
+        action = delta_xyz_m + delta_rpy_rad + [float(value) for value in o6_target]
+        if recording_mode == "joint":
+            observation_state = observation_state[:6] + observation_state[12:]
+            action = [math.radians(value) for value in telemetry["target_full_deg"][:6]] + [
+                float(value) for value in o6_target
+            ]
+
         quality["sample_latency_s"] = now - sample_started_at
         quality["command_age_s"] = now - action_timestamp
         return {
             "timestamp": now,
             "quality": quality,
             "observation_state": observation_state,
-            "action": delta_xyz_m
-            + delta_rpy_rad
-            + [float(value) for value in o6_target],
+            "action": action,
+            "recording_mode": recording_mode,
         }
 
     def snapshot(self) -> dict[str, Any]:

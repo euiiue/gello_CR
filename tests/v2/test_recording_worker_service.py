@@ -275,3 +275,22 @@ def test_unknown_operation_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="Unknown worker operation"):
         service.handle_request({"op": "nope"}, b"")
+
+
+def test_joint_session_rejects_tcp_frames_and_records_joint_units(tmp_path):
+    service, factory, _ = _service()
+    service.handle_request({"op": "init", "repo_id": "local/joint", "root": str(tmp_path / "joint"),
+                            "fps": 20, "height": 224, "width": 224,
+                            "recording_mode": "joint"}, b"")
+    assert factory.calls[0]["robot_type"] == "dobot_cr3_o6"
+    assert factory.calls[0]["features"]["observation.state"]["names"][:6] == [
+        f"cr3.q{i}.rad" for i in range(1, 7)
+    ]
+    request = {"op": "add_frame", "state": [0.] * 12, "action": [1.] * 12,
+               "task": "test", "recording_mode": "tcp"}
+    with pytest.raises(ValueError, match="mode"):
+        service.handle_request(request, _raw_frame())
+    assert not factory.dataset.frames
+    request["recording_mode"] = "joint"
+    service.handle_request(request, _raw_frame())
+    np.testing.assert_equal(factory.dataset.frames[0]["action"], [1.] * 12)

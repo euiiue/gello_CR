@@ -88,6 +88,7 @@ def prepare_recording_frame(
 
     payload = {
         "op": "add_frame",
+        "recording_mode": sample.get("recording_mode", "tcp"),
         "state": [float(value) for value in sample["observation_state"]],
         "action": [float(value) for value in sample["action"]],
         "task": str(task),

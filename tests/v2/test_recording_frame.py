@@ -62,6 +62,7 @@ def test_prepare_frame_preserves_add_frame_payload_contract() -> None:
 
     assert prepared.payload == {
         "op": "add_frame",
+        "recording_mode": "tcp",
         "state": [float(value) for value in range(18)],
         "action": [float(value) for value in range(12)],
         "task": "Pick object",

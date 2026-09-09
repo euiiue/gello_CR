@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gello_cr.data_contract import ACTION_DIM, STATE_DIM
+from gello_cr.data_contract import ACTION_DIM, JOINT_STATE_FIELDS, recording_fields
 from .schema import LEROBOT_IMAGE_FEATURE_KEYS
 
 
@@ -20,10 +20,15 @@ def validate_dataset(root: str | Path) -> dict:
     info = json.loads((root / 'meta/info.json').read_text())
     if not str(info['codebase_version']).startswith('v3.'):
         raise ValueError('Validator requires LeRobot v3 metadata')
+    mode = "joint" if info["features"]["observation.state"].get("names") == list(JOINT_STATE_FIELDS) else "tcp"
+    state_fields, action_fields = recording_fields(mode)
+    state_dim = len(state_fields)
+    if mode == "joint" and info["features"]["action"]["names"] != list(action_fields):
+        raise ValueError("Joint action names/units do not match contract")
     fps = float(info['fps'])
     if not np.isfinite(fps) or fps <= 0:
         raise ValueError('Invalid fps')
-    for key, dim in [('observation.state', STATE_DIM), ('action', ACTION_DIM)]:
+    for key, dim in [('observation.state', state_dim), ('action', ACTION_DIM)]:
         if info['features'][key]['shape'] != [dim]:
             raise ValueError(f'{key}: invalid metadata dimension')
     data_files = sorted((root / 'data').rglob('*.parquet'))
@@ -60,7 +65,7 @@ def validate_dataset(root: str | Path) -> dict:
             raise ValueError(f'Episode {index}: frame count mismatch')
         if [int(r['frame_index']) for r in frames] != list(range(count)):
             raise ValueError(f'Episode {index}: invalid frame indices')
-        for key, dim in [('observation.state', STATE_DIM), ('action', ACTION_DIM)]:
+        for key, dim in [('observation.state', state_dim), ('action', ACTION_DIM)]:
             array = np.asarray([r[key] for r in frames], dtype=float)
             if array.shape != (count, dim) or not np.isfinite(array).all():
                 raise ValueError(f'Episode {index}: {key} invalid shape or NaN/Inf')
@@ -70,6 +75,8 @@ def validate_dataset(root: str | Path) -> dict:
         ):
             raise ValueError(f'Episode {index}: invalid dataset timestamps')
         sidecar = json.loads((root / f'meta/collection/episode_{index:06d}.json').read_text())
+        if sidecar.get("recording_mode", "tcp") != mode:
+            raise ValueError("Episode recording mode mismatch")
         if sidecar['episode_index'] != index or sidecar['frame_count'] != count:
             raise ValueError(f'Episode {index}: collection count mismatch')
         if sidecar['outcome'] not in ('success', 'failure'):

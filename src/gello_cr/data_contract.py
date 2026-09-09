@@ -1,4 +1,4 @@
-"""Frozen LeRobot/OpenPI data contract during V2 migration."""
+"""Legacy TCP and CR3 absolute-joint LeRobot recording contracts."""
 
 STATE_DIM = 18
 ACTION_DIM = 12
@@ -44,3 +44,16 @@ ACTION_FIELDS = (
 
 assert len(STATE_FIELDS) == STATE_DIM
 assert len(ACTION_FIELDS) == ACTION_DIM
+
+
+JOINT_STATE_FIELDS = tuple(f"cr3.q{i}.rad" for i in range(1, 7)) + STATE_FIELDS[12:]
+JOINT_ACTION_FIELDS = tuple(f"cr3.target_q{i}.rad" for i in range(1, 7)) + ACTION_FIELDS[6:]
+
+
+def recording_fields(mode="tcp"):
+    """TCP retains the legacy contract; joint actions are absolute sent targets."""
+    if mode == "tcp":
+        return STATE_FIELDS, ACTION_FIELDS
+    if mode == "joint":
+        return JOINT_STATE_FIELDS, JOINT_ACTION_FIELDS
+    raise ValueError(f"Unknown recording mode: {mode}")
