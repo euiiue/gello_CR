@@ -80,6 +80,7 @@ class ApplicationService:
         self._normal_dispatch_lock = threading.Lock()
         self._event_sequence = 0
         self._last_error = ""
+        self._preemption_generation = 0
 
     @property
     def state(self) -> WorkflowState:
@@ -133,11 +134,39 @@ class ApplicationService:
     ) -> CommandResult:
         data = MappingProxyType(dict(payload or {}))
 
+        if command is Command.RETURN_HOME:
+            return self._dispatch_home(data)
+
         if command in _PRETRANSITION_COMMANDS:
             return self._dispatch_safety(command, data)
 
         with self._normal_dispatch_lock:
             return self._dispatch_normal(command, data)
+
+    def _dispatch_home(self, data: Mapping[str, Any]) -> CommandResult:
+        command = Command.RETURN_HOME
+        with self._lock:
+            self._validate_locked(command, data)
+            handler = self._handlers[command]
+            previous = self._state_machine.state
+            self._preemption_generation += 1
+            generation = self._preemption_generation
+            self._state_machine.apply(command)
+            self._emit_locked(kind="state_changed", level=EventLevel.INFO,
+                              message="机械臂正在回 HOME", command=command, details=data)
+        try:
+            value = handler(data)
+        except Exception as exc:
+            self.report_external_fault(f"HOME 回位失败：{exc}")
+            raise
+        with self._lock:
+            if self._preemption_generation != generation or self.state is not WorkflowState.RETURNING_HOME:
+                raise CommandSuperseded("HOME 回位被停止或故障中断")
+            state = self._state_machine.apply(Command.HOME_COMPLETED)
+            self._last_error = ""
+            self._emit_locked(kind="command_completed", level=EventLevel.INFO,
+                              message="机械臂已回 HOME，保持停止", command=command, details=data)
+            return CommandResult(command, previous, state, value)
 
     def _dispatch_safety(
         self,
@@ -149,6 +178,7 @@ class ApplicationService:
             self._validate_locked(command, data)
             handler = self._handlers.get(command)
             new_state = self._state_machine.apply(command)
+            self._preemption_generation += 1
             self._last_error = ""
             self._emit_locked(
                 kind="state_changed",
@@ -197,6 +227,7 @@ class ApplicationService:
         data: Mapping[str, Any],
     ) -> CommandResult:
         with self._lock:
+            generation = self._preemption_generation
             previous_state = self._state_machine.state
             self._validate_locked(command, data)
             handler = self._handlers.get(command)
@@ -223,7 +254,7 @@ class ApplicationService:
 
         with self._lock:
             current_state = self._state_machine.state
-            if current_state is not previous_state:
+            if current_state is not previous_state or generation != self._preemption_generation:
                 message = (
                     f"{command.name} handler completed after workflow changed "
                     f"{previous_state.name} -> {current_state.name}; "

@@ -35,7 +35,7 @@ def test_config_and_environment_load_without_pythonpath(tmp_path, monkeypatch, o
 
 def test_repo_fallback_is_selected_without_native_import(monkeypatch):
     import gello_cr.devices.cr3a as module
-    expected = Path(module.__file__).resolve().parents[3] / 'TESTRobot_INEXBOT'
+    expected = Path(module.__file__).resolve().parents[3] / 'vendor' / 'nrc'
     def fake_import(name):
         assert name == 'nrc_interface'
         assert Path(sys.path[0]) == expected

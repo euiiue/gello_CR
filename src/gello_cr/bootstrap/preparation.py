@@ -26,6 +26,9 @@ class OperatorReadinessProvider:
         master = self._runtime.master_controller
         o6 = self._runtime.o6_controller
         camera = self._cameras.snapshot()
+        camera_error = str(camera.error or "")
+        if camera.running and not camera_error:
+            camera_error = self._runtime.sample_source.readiness_error()
 
         return {
             "master_type": str(
@@ -39,9 +42,9 @@ class OperatorReadinessProvider:
             ),
             "cameras_running": bool(camera.running),
             "camera_frames_ready": bool(
-                self._runtime.sample_source.snapshot_ready()
+                camera.running and not camera_error
             ),
-            "camera_error": str(camera.error or ""),
+            "camera_error": camera_error,
         }
 
 

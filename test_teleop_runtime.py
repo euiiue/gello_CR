@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import tempfile
 import threading
 import time
@@ -784,6 +785,13 @@ class TeleopEngineTests(unittest.TestCase):
         self.master.connected = False
         self.engine.set_master(gello)
         self.store.data["gello"]["control_mode"] = "tcp_6d"
+        urdf = Path(__file__).resolve().parent / (
+            "vendor/gello/gello/factr/urdf/"
+            "yam_active_gello/robot.urdf"
+        )
+        self.store.data["gello"]["kinematics_urdf"] = os.path.relpath(
+            urdf, self.store.path.parent
+        )
         self.store.data["gello"]["startup_settle_s"] = 0.0
         self.store.data["robot"]["safety_max_command_speed_rad_s"] = 100.0
         self.store.data["robot"]["safety_max_tracking_error_rad"] = 10.0
@@ -809,7 +817,9 @@ class TeleopEngineTests(unittest.TestCase):
         self.assertAlmostEqual(self.robot.servoj_targets[-1][5], 0.0, places=6)
         self.assertTrue(
             np.isfinite(
-                GelloKinematics(self.store.data["gello"]["kinematics_urdf"])
+                GelloKinematics(
+                    self.store.path.parent / self.store.data["gello"]["kinematics_urdf"]
+                )
                 .position(gello.value.arm_joints_rad)
             ).all()
         )
@@ -960,6 +970,20 @@ class TeleopEngineTests(unittest.TestCase):
         self.engine._set_state("idle")
         with self.assertRaisesRegex(RuntimeError, "已下发目标"):
             self.engine.dataset_sample()
+
+    def test_joint_dataset_records_home_target_during_home_motion(self):
+        self.store.data["dataset"]["recording_mode"] = "joint"
+        self.engine._set_state("preset")
+        self.engine._set_dataset_target_joints([10, 20, 30, 40, 50, 60, 0])
+        self.robot.joints = [1, 2, 3, 4, 5, 6, 0]
+
+        sample = self.engine.dataset_sample()
+
+        self.assertEqual(sample["recording_mode"], "joint")
+        for result, degrees in zip(sample["observation_state"][:6], [1, 2, 3, 4, 5, 6]):
+            self.assertAlmostEqual(result, math.radians(degrees))
+        for result, degrees in zip(sample["action"][:6], [10, 20, 30, 40, 50, 60]):
+            self.assertAlmostEqual(result, math.radians(degrees))
 
     def test_dataset_tcp_rpy_uses_native_rad_and_shortest_delta(self):
         self.robot.tcp = [500.0, 10.0, 300.0, 3.10, -3.10, 0.25, 0.0]
@@ -1299,6 +1323,28 @@ class TeleopEngineTests(unittest.TestCase):
         self.assertIsNone(self.engine._preset_thread)
         self.assertEqual(self.hand.targets, [])
 
+    def test_priority_home_also_returns_o6_when_connected(self):
+        self.engine.save_preset("HOME")
+        target = self.robot.joints.copy()
+        home_o6 = tuple(self.store.data["o6"]["actions"][self.store.data["o6"]["open_action"]])
+        self.robot.joints = [20.0] * 7
+        self.hand.set_target((0, 0, 0, 0, 0, 0))
+        self.engine.return_home(lambda: None)
+        self.assertEqual(self.robot.movej_targets, [target])
+        self.assertEqual(self.hand.targets[-1], home_o6)
+        self.assertEqual(self.hand.position, home_o6)
+        self.assertEqual(self.engine.state, "idle")
+
+    def test_priority_home_returns_o6_and_clears_manual_override(self):
+        self.engine.save_preset("HOME")
+        home_o6 = tuple(self.store.data["o6"]["actions"][self.store.data["o6"]["open_action"]])
+        self.engine.execute_o6_action("抓取")
+        self.assertTrue(self.engine.o6_manual_override)
+        self.engine.return_home(lambda: None)
+        self.assertEqual(self.hand.position, home_o6)
+        self.assertFalse(self.engine.o6_manual_override)
+        self.assertEqual(self.engine.state, "idle")
+
     def test_priority_home_cancels_old_replay_before_new_move(self):
         self.engine.save_preset("HOME")
         exited = threading.Event()
@@ -1359,8 +1405,9 @@ class TeleopEngineTests(unittest.TestCase):
         self.engine.return_home(during_recording_stop)
         self.assertEqual(len(self.robot.movej_targets), 1)
 
-    def test_priority_home_recording_stop_failure_prevents_move(self):
+    def test_priority_home_recording_stop_failure_after_move(self):
         self.engine.save_preset("HOME")
+        target = self.robot.joints.copy()
 
         def failed_recording_stop():
             raise TimeoutError("recording did not stop")
@@ -1368,7 +1415,54 @@ class TeleopEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, "recording did not stop"):
             self.engine.return_home(failed_recording_stop)
         self.assertTrue(self.robot.stopped)
-        self.assertEqual(self.robot.movej_targets, [])
+        self.assertEqual(self.robot.movej_targets, [target])
+        self.assertEqual(self.engine.state, "fault")
+
+    def test_priority_home_records_home_motion_before_stopping_recording(self):
+        self.engine.save_preset("HOME")
+        target = self.robot.joints.copy()
+        self.robot.joints = [20.0] * 7
+        events = []
+
+        def recording_stop():
+            # stop_recording must run only after the HOME MoveJ has been issued.
+            events.append(("stop_recording", list(self.robot.movej_targets)))
+
+        self.engine.return_home(recording_stop)
+        self.assertEqual(events, [("stop_recording", [target])])
+        self.assertEqual(self.engine.state, "idle")
+
+    def test_priority_home_joint_mode_sets_home_joint_action(self):
+        self.store.data["dataset"]["recording_mode"] = "joint"
+        self.engine.save_preset("HOME")
+        samples = []
+
+        def recording_stop():
+            # stop_recording runs after the HOME MoveJ; joint mode must still
+            # produce a valid dataset sample instead of raising.
+            samples.append(self.engine.dataset_sample()["recording_mode"])
+
+        self.engine.return_home(recording_stop)
+        self.assertEqual(samples, ["joint"])
+        self.assertEqual(self.engine.state, "idle")
+
+    def test_priority_home_sets_joint_target_before_leaving_following(self):
+        self.store.data["dataset"]["recording_mode"] = "joint"
+        self.engine.save_preset("HOME")
+        self.robot.servo_state = lambda: 0
+        seen = []
+
+        def power_on():
+            # power_on runs before MoveJ but after state leaves "following";
+            # the HOME joint target must already be in place to keep
+            # dataset_sample() from raising during the return window.
+            seen.append(self.engine._dataset_target_joints_deg is not None)
+            self.robot.servo_state = lambda: 3
+
+        self.robot.power_on = power_on
+        self.engine.return_home(lambda: None)
+        self.assertEqual(seen, [True])
+        self.assertEqual(self.engine.state, "idle")
 
     def test_priority_home_missing_target_never_moves(self):
         with self.assertRaisesRegex(RuntimeError, "尚未保存"):

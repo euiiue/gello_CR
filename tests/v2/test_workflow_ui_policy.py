@@ -105,6 +105,22 @@ def test_safe_state_allows_only_failure_resolution_for_pending_episode(
     assert policy.discard_episode
 
 
+def test_robot_enabled_allows_full_resolution_for_pending_episode() -> None:
+    # After HOME, the workflow lands on ROBOT_ENABLED with a pending Episode;
+    # the operator must still be able to save it as success.
+    policy = workflow_ui_policy(
+        WorkflowState.ROBOT_ENABLED,
+        episode_active=False,
+        episode_pending=True,
+    )
+
+    assert policy.save_success
+    assert policy.save_failure
+    assert policy.discard_episode
+    assert not policy.stop_episode
+    assert policy.start_teleop
+
+
 def test_fault_allows_escalation_to_estop_but_estop_does_not() -> None:
     fault = workflow_ui_policy(
         WorkflowState.FAULT,

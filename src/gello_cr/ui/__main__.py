@@ -100,6 +100,23 @@ def main(argv: list[str] | None = None) -> int:
         dataset_cfg = operator.runtime.store.data["dataset"]
         window.task_edit.setText(str(dataset_cfg["task"]))
         window.root_edit.setText(str(dataset_cfg["root"]))
+
+        def persist_dataset_root():
+            path = window.root_edit.text().strip()
+            if not path:
+                window.statusBar().showMessage("数据集父目录不能为空")
+                return
+            path = str(Path(path).expanduser().resolve())
+            try:
+                settings = OperatorSettings(operator.runtime.store.path, type(operator.runtime.store))
+                if settings.data["dataset"]["root"] != path:
+                    settings.data["dataset"]["root"] = path
+                    settings.save(settings.data)
+                window.root_edit.setText(path)
+            except Exception as exc:
+                window.statusBar().showMessage(f"默认保存目录未能写入配置：{exc}")
+
+        window.root_edit.editingFinished.connect(persist_dataset_root)
         window.statusBar().showMessage(
             "OFFLINE · cameras stopped · no hardware auto-connect",
             15000,

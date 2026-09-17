@@ -2,8 +2,16 @@
 
 新操作界面入口是 `scripts/run_operator.sh`。启动状态始终为 **OFFLINE**，
 不自动连接硬件、开启相机、使能机器人或发送 ServoJ。
-当前交付用于离线验收和后续真机联调；实际接口稳定性需要完成
-[统一硬件验收表](docs/HARDWARE_ACCEPTANCE.md)，不能由 pytest 结果代替。
+当前交付用于离线验收和后续真机联调；实际接口稳定性需要人工完成统一硬件验收，
+不能由 pytest 结果代替。
+
+## 项目结构
+
+- `src/gello_cr/`：遥操作应用、设备适配、录制和界面代码。
+- `vendor/`：随项目管理的设备 SDK 与旧版 FT300 驱动，见 [vendor 说明](vendor/README.md)。
+- `tests/`：pytest 自动化回归测试，不是运行时驱动目录。
+- `teleop_runtime.py`、`lerobot_recorder.py`：仍被新界面工厂使用的根目录兼容运行时。
+- `TEST_INEXBOT.py`：旧版操作界面入口；新界面从 `scripts/run_operator.sh` 启动。
 
 ## 安装与启动
 
@@ -11,52 +19,55 @@
 环境，安装应用依赖；原有硬件/训练环境可以继续使用，不需替换。
 
 ```bash
-cd ~/cyf/gello_CR
+cd /path/to/gello_CR
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[ui,dev]'
-GELLO_CR_PYTHON="$PWD/.venv/bin/python" scripts/run_operator.sh --check-only
-GELLO_CR_PYTHON="$PWD/.venv/bin/python" scripts/run_operator.sh
+scripts/run_operator.sh --check-only
+scripts/run_operator.sh
 ```
 
-本机已有解释器可用于纯启动检查：
+启动器默认使用项目内 `.venv/bin/python`；没有 `.venv` 时使用系统
+`python3.12`。其他兼容环境可显式指定：
 
 ```bash
-GELLO_CR_PYTHON=/home/ace/cyf/TEST_PY12/bin/python3.12 scripts/run_operator.sh --check-only
+GELLO_CR_PYTHON=/path/to/python3.12 scripts/run_operator.sh --check-only
 ```
 
 启动器管理应用源码路径和 Python 动态库目录（包含 venv 的 base_prefix），
-无需手工设置 PYTHONPATH。SDK 目录优先级：`NRC_SDK_ROOT` 环境变量 >
-配置 `robot.sdk_root` > 仓库 `TESTRobot_INEXBOT`。
-详见 [NRC 加载与动态库排错](docs/NRC_SDK_LOADING.md)。
+无需手工设置 PYTHONPATH。NRC SDK 默认从仓库加载；如需使用其他 SDK，设置
+`NRC_SDK_ROOT` 或配置 `robot.sdk_root`。
 
 硬件环境另需 GELLO 的 `dynamixel-sdk`、O6 SDK 对应的 `pymodbus==3.5.1`、
 D435 的 `pyrealsense2`。O6 源码位于 Git 子模块；新克隆仓库先执行
-`git submodule update --init --recursive`。这些驱动只在人工连接时使用，
+`git submodule update --init --recursive`。随项目携带的设备库集中在 `vendor/`：
+GELLO、NRC、LinkerHand 子模块和旧版 Robotiq FT300 传感器驱动。这些驱动只在人工连接时使用，
 离线测试不加载真实设备 SDK。
 
-LeRobot 在 `dataset.worker_python` 指定的独立环境中运行。
-本机配置为 `/home/ace/miniconda3/envs/lerobot/bin/python`，其安装源码在
-`/home/ace/lerobot`。所需接口包括 `LeRobotDataset.create`、
+LeRobot 在 `dataset.worker_python` 指定的独立环境中运行。该环境需要提供
+`LeRobotDataset.create`、
 `RGBEncoderConfig` 和 streaming encoding；本地实际写盘已用该版本验证。
-不要仅凭同名 PyPI 包已安装就认定接口兼容。
+迁移项目时需在配置中指定兼容的 LeRobot Python 环境；应用通过 worker 进程调用，
+不导入 LeRobot 源码。也可通过 `GELLO_CR_DATA_PYTHON=/path/to/lerobot/python`
+在启动时覆盖配置路径。不要仅凭同名 PyPI 包已安装就认定接口兼容。
+
+可选 DAgger 部署代码来自独立 OpenPI 项目。使用时在启动前设置
+`GELLO_CR_OPENPI_ROOT=/path/to/openpi_cr3_o6`；不使用 DAgger 无需安装 OpenPI。
 
 ## 配置与数据含义
 
 启动后、连接设备前，可点击右上角 **⚙ 设置**，分组编辑机械臂速度与保护、
 GELLO 参数、O6 动作库及开合选择、数采相机和控制器连接参数。
-保存会备份原配置，**关闭并重启程序后生效**；完整说明见
-[操作台参数设置](docs/OPERATOR_SETTINGS.md)。
+保存会备份原配置，**关闭并重启程序后生效**。参数保存在
+`config/roarm_cr5_teleop.json`。
 
-配置文件：`config/roarm_cr5_teleop.json`。本轮没有修改机器人参数或标定。
-部署到其他目录前检查 `gello.software_root`、`gello.kinematics_urdf`、串口 by-id、
-相机序列号、数据根目录和 worker_python。当前两个 GELLO 资源路径仍指向原工作区，
-应在迁移机器时明确指向实际安装目录；仓库已包含只读 Dynamixel 实现和 FK URDF。
+`gello.software_root` 和 `gello.kinematics_urdf` 使用相对配置文件的路径，
+会解析到本项目内的 GELLO 副本。迁移到其他设备时仍需配置串口 by-id、相机序列号、
+数据根目录和 `dataset.worker_python`。仓库已包含只读 Dynamixel 实现和 FK URDF。
 
 当前配置为 joint 跟随，J1–J6 顺序不变，倍率 1.1；offsets/signs 原样保留。
-`servoj_vmax/amax/jmax = 80/195/120`，没有在本轮调参。
-V2 关节使用 rad，NRC 发送值转换为 deg。首次目标、速度、步长和跟踪误差保护
-继续使用现有逻辑。现有安全阈值也原样保留，其是否适用于实际机械臂需在硬件
-验收前复核；测试通过不证明阈值适合现场。
+`safety_max_command_speed_rad_s` 从 20 调整为 40；`servoj_vmax/amax/jmax` 从
+80/195/120 调整为 100/200/180。V2 关节使用 rad，NRC 发送值转换为 deg。
+安全参数是否适用于实际机械臂需在硬件验收前复核；测试通过不证明阈值适合现场。
 
 - `observation.state`：18 维，6 个关节 rad + TCP xyz/rpy（m/rad）+ 6 个 O6 原始位置。
 - `action`：12 维，TCP delta（m/rad）+ 6 个 O6 目标；不是绝对关节目标。
@@ -104,7 +115,7 @@ active/pending Episode 阻止关闭窗口，不会静默保存成功或丢弃。
 数据校验是只读操作，需要已正常 finalize 的 **LeRobot v3** 数据集：
 
 ```bash
-GELLO_CR_DATA_PYTHON=/home/ace/miniconda3/envs/lerobot/bin/python \
+GELLO_CR_DATA_PYTHON=/path/to/lerobot/python \
   scripts/validate_dataset.sh '/path/to/finalized/dataset'
 ```
 

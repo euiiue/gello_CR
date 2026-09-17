@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from gello_cr.data_contract import ACTION_DIM, JOINT_STATE_FIELDS, recording_fields
-from .schema import LEROBOT_IMAGE_FEATURE_KEYS
+from .schema import LEROBOT_IMAGE_FEATURE_KEYS, SAMPLE_IMAGE_KEYS
 
 
 def validate_dataset(root: str | Path) -> dict:
@@ -86,9 +86,22 @@ def validate_dataset(root: str | Path) -> dict:
         json.dumps(sidecar, allow_nan=False)
         if any(task_names[int(r['task_index'])] != sidecar['task'] for r in frames):
             raise ValueError(f'Episode {index}: task mismatch')
-        if sidecar['image_streams'] != dict(zip(
-            ('Base RGB', 'Wrist RGB', 'Base ROI'), LEROBOT_IMAGE_FEATURE_KEYS
-        )):
+        streams = sidecar.get('camera_streams')
+        if streams:
+            from gello_cr.devices.camera_streams import resolve_camera_streams
+            resolve_camera_streams({'camera_streams': [
+                {key: stream[key] for key in ('name', 'serial', 'mode', 'roi_norm')}
+                for stream in streams
+            ]})
+            if ([stream['feature_key'] for stream in streams] != list(LEROBOT_IMAGE_FEATURE_KEYS)
+                    or [stream['sample_key'] for stream in streams] != list(SAMPLE_IMAGE_KEYS)):
+                raise ValueError(f'Episode {index}: camera slot order mismatch')
+            image_streams = {stream['name']: stream['feature_key'] for stream in streams}
+        else:
+            image_streams = dict(zip(
+                ('Base RGB', 'Wrist RGB', 'Base ROI'), LEROBOT_IMAGE_FEATURE_KEYS, strict=True
+            ))
+        if sidecar['image_streams'] != image_streams:
             raise ValueError(f'Episode {index}: image stream mapping mismatch')
         samples = sidecar['samples']
         if len(samples) != count:
@@ -98,17 +111,19 @@ def validate_dataset(root: str | Path) -> dict:
             raise ValueError(f'Episode {index}: invalid host timestamps')
         for sample in samples:
             quality = sample['quality']
-            for key in ('wrist_timestamp', 'base_timestamp', 'wrist_age_s',
-                        'base_age_s', 'camera_skew_s'):
+            cameras = ('wrist', 'base', 'roi') if streams or 'roi_timestamp' in quality else ('wrist', 'base')
+            for key in [*(f'{camera}_{suffix}' for camera in cameras
+                          for suffix in ('timestamp', 'age_s')), 'camera_skew_s']:
                 value = float(quality[key])
                 if not np.isfinite(value) or value < 0:
                     raise ValueError(f'Episode {index}: invalid {key}')
-            if not np.isclose(quality['camera_skew_s'],
-                              abs(quality['wrist_timestamp'] - quality['base_timestamp']), atol=1e-6):
+            camera_times = [quality[f'{camera}_timestamp'] for camera in cameras]
+            if not np.isclose(quality['camera_skew_s'], max(camera_times) - min(camera_times), atol=1e-6):
                 raise ValueError(f'Episode {index}: camera skew inconsistent')
-            if not np.isclose(quality['wrist_age_s'] - quality['base_age_s'],
-                              quality['base_timestamp'] - quality['wrist_timestamp'], atol=1e-6):
-                raise ValueError(f'Episode {index}: camera age inconsistent')
+            for camera in cameras:
+                if not np.isclose(quality[f'{camera}_age_s'] - quality['base_age_s'],
+                                  quality['base_timestamp'] - quality[f'{camera}_timestamp'], atol=1e-6):
+                    raise ValueError(f'Episode {index}: camera age inconsistent')
         if sidecar['quality']['needs_review']:
             review.append(index)
         for key in LEROBOT_IMAGE_FEATURE_KEYS:

@@ -15,6 +15,9 @@ class CameraPreview:
     roi_rgb: Any = None
     base_timestamp: float = 0.0
     wrist_timestamp: float = 0.0
+    roi_timestamp: float = 0.0
+    stream_names: tuple[str, ...] = ("Base RGB", "Wrist RGB", "Base ROI")
+    stream_descriptions: tuple[str, ...] = ()
 
     @property
     def has_base(self) -> bool:
@@ -35,6 +38,9 @@ class CameraPreview:
     ) -> "CameraPreview":
         data = snapshot or {}
         return cls(
+            roi_timestamp=float(data.get("roi_timestamp", 0.0)),
+            stream_names=tuple(data.get("stream_names", ("Base RGB", "Wrist RGB", "Base ROI"))),
+            stream_descriptions=tuple(data.get("stream_descriptions", ())),
             base_rgb=data.get("base_rgb"),
             wrist_rgb=data.get("wrist_rgb"),
             roi_rgb=data.get("roi_rgb"),

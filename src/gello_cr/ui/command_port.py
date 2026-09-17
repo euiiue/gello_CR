@@ -117,6 +117,7 @@ class AsyncApplicationCommandPort:
         self._safety_queue: queue.Queue[CommandRequest] = queue.Queue(
             maxsize=int(safety_capacity)
         )
+        self._home_queue: queue.Queue[CommandRequest] = queue.Queue(maxsize=1)
         self._error_callback = error_callback
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -137,6 +138,11 @@ class AsyncApplicationCommandPort:
         )
         self._normal_thread.start()
         self._safety_thread.start()
+        self._home_thread = threading.Thread(
+            target=self._worker, args=(self._home_queue,),
+            name="ApplicationCommand-Home", daemon=True,
+        )
+        self._home_thread.start()
 
     @property
     def closed(self) -> bool:
@@ -159,6 +165,7 @@ class AsyncApplicationCommandPort:
             if request.command in self._pending:
                 raise CommandAlreadyPending(f"{request.command.name} is already pending")
             target = (
+                self._home_queue if request.command is Command.RETURN_HOME else
                 self._safety_queue
                 if request.command in _SAFETY_COMMANDS
                 else self._normal_queue
@@ -204,21 +211,25 @@ class AsyncApplicationCommandPort:
                     self._pending.discard(request.command)
                 work_queue.task_done()
 
-    def close(self, timeout: float = 1.0) -> None:
-        duration = max(0.0, float(timeout))
+    def stop_accepting(self) -> None:
         with self._lock:
-            if self._closed:
-                return
             self._closed = True
             self._stop.set()
-
         self._discard_pending(self._normal_queue)
         self._discard_pending(self._safety_queue)
+        self._discard_pending(self._home_queue)
+
+    def close(self, timeout: float = 1.0) -> None:
+        duration = max(0.0, float(timeout))
+        self.stop_accepting()
 
         deadline = time.monotonic() + duration
-        for thread in (self._normal_thread, self._safety_thread):
+        for thread in (self._normal_thread, self._safety_thread, self._home_thread):
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
+        alive = [t.name for t in (self._normal_thread, self._safety_thread, self._home_thread) if t.is_alive()]
+        if alive:
+            raise CommandPortError("命令线程尚未退出：" + ", ".join(alive))
 
     def _discard_pending(
         self, work_queue: queue.Queue[CommandRequest],

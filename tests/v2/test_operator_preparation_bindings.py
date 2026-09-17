@@ -83,6 +83,9 @@ class Source:
     def snapshot_ready(self):
         return self.ready
 
+    def readiness_error(self):
+        return "" if self.ready else "腕部相机帧过期（13.00s）"
+
 
 class Runtime:
     def __init__(self, engine, source):
@@ -208,3 +211,22 @@ def test_readiness_provider_is_read_only() -> None:
     assert not snapshot["camera_frames_ready"]
     assert engine.connect_calls == 0
     assert cameras.started == 0
+
+
+def test_readiness_reports_stale_frames_and_clears_after_recovery():
+    engine = Engine()
+    source = Source()
+    cameras = Cameras()
+    cameras.running = True
+    provider = OperatorReadinessProvider(runtime=Runtime(engine, source), cameras=cameras)
+
+    snapshot = provider.snapshot()
+    assert snapshot['cameras_running']
+    assert not snapshot['camera_frames_ready']
+    assert '腕部' in snapshot['camera_error']
+
+    source.ready = True
+    snapshot = provider.snapshot()
+    assert snapshot['camera_frames_ready']
+    assert snapshot['camera_error'] == ''
+    assert cameras.started == cameras.stopped == 0

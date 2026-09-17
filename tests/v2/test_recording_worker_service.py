@@ -103,17 +103,17 @@ def test_init_preserves_dataset_and_encoder_configuration(tmp_path) -> None:
         {
             "vcodec": "h264",
             "pix_fmt": "yuv420p",
-            "crf": 28,
+            "crf": 18,
             "preset": "fast",
             "g": 20,
         }
     ]
 
 
-def test_init_rejects_non_224_image_size(tmp_path) -> None:
+def test_init_rejects_odd_image_size(tmp_path) -> None:
     service, _, _ = _service()
 
-    with pytest.raises(ValueError, match="224x224"):
+    with pytest.raises(ValueError, match="even"):
         service.handle_request(
             {
                 "op": "init",
@@ -121,7 +121,7 @@ def test_init_rejects_non_224_image_size(tmp_path) -> None:
                 "root": str(tmp_path / "dataset"),
                 "fps": 20,
                 "height": 224,
-                "width": 200,
+                "width": 201,
             },
             b"",
         )

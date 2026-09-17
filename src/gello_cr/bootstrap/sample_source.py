@@ -1,4 +1,3 @@
-
 """Thread-safe LeRobot sample source independent of any GUI framework."""
 
 from __future__ import annotations
@@ -7,6 +6,9 @@ import threading
 import time
 from collections.abc import Mapping
 from typing import Any
+
+from gello_cr.devices.camera_streams import CameraStreamConfig, camera_stream_metadata
+from gello_cr.recording.schema import SAMPLE_IMAGE_KEYS
 
 
 def _copy_image(image: Any) -> Any:
@@ -17,127 +19,117 @@ def _copy_image(image: Any) -> Any:
 
 
 class RecordingSampleSource:
-    """Combine TeleopEngine dataset state with the latest three RGB streams.
-
-    Camera devices update this object through CameraPollingService.  The same
-    thread-safe cache feeds both LeRobot recording and read-only UI previews.
-    Constructing the source performs no hardware I/O.
-    """
+    """One image cache supplies both the UI and the LeRobot worker."""
 
     def __init__(
         self,
         teleop_engine: Any,
         dataset_config: Mapping[str, Any],
+        *,
+        streams: tuple[CameraStreamConfig, ...] = (),
     ) -> None:
         self._teleop_engine = teleop_engine
         self._dataset_config = dataset_config
+        self._streams = streams
+        self._metadata = camera_stream_metadata(streams) if streams else []
+        self._names = tuple(s.name for s in streams) if streams else ("基座", "腕部", "第三路")
         self._lock = threading.RLock()
-        self._wrist_rgb = None
-        self._wrist_timestamp = 0.0
-        self._base_rgb = None
-        self._base_roi_rgb = None
-        self._base_timestamp = 0.0
+        self._images = [None, None, None]
+        self._timestamps = [0.0, 0.0, 0.0]
+
+    def update_stream(self, index: int, image_rgb: Any, timestamp: float) -> None:
+        with self._lock:
+            self._images[index] = image_rgb
+            self._timestamps[index] = float(timestamp)
+
+    def clear_streams(self) -> None:
+        with self._lock:
+            self._images = [None, None, None]
+            self._timestamps = [0.0, 0.0, 0.0]
 
     def update_wrist(self, image_rgb: Any, timestamp: float) -> None:
-        with self._lock:
-            self._wrist_rgb = image_rgb
-            self._wrist_timestamp = float(timestamp)
+        self.update_stream(1, image_rgb, timestamp)
 
-    def update_base(
-        self,
-        image_rgb: Any,
-        roi_rgb: Any,
-        timestamp: float,
-    ) -> None:
+    def update_base(self, image_rgb: Any, roi_rgb: Any, timestamp: float) -> None:
+        # Compatibility with the original base RGB + base ROI producer.
         with self._lock:
-            self._base_rgb = image_rgb
-            self._base_roi_rgb = roi_rgb
-            self._base_timestamp = float(timestamp)
+            self.update_stream(0, image_rgb, timestamp)
+            self.update_stream(2, roi_rgb, timestamp)
 
     def clear_wrist(self) -> None:
-        with self._lock:
-            self._wrist_rgb = None
-            self._wrist_timestamp = 0.0
+        self.update_stream(1, None, 0.0)
 
     def clear_base(self) -> None:
-        with self._lock:
-            self._base_rgb = None
-            self._base_roi_rgb = None
-            self._base_timestamp = 0.0
+        self.update_base(None, None, 0.0)
 
     def preview_snapshot(self) -> dict[str, Any]:
-        """Return detached RGB copies for UI presentation.
-
-        The recorder's live cache is never exposed directly to Qt.  Copies keep
-        QImage conversion outside the camera/update critical section.
-        """
-
         with self._lock:
             return {
-                "wrist_rgb": _copy_image(self._wrist_rgb),
-                "wrist_timestamp": float(self._wrist_timestamp),
-                "base_rgb": _copy_image(self._base_rgb),
-                "roi_rgb": _copy_image(self._base_roi_rgb),
-                "base_timestamp": float(self._base_timestamp),
+                "base_rgb": _copy_image(self._images[0]),
+                "wrist_rgb": _copy_image(self._images[1]),
+                "roi_rgb": _copy_image(self._images[2]),
+                "base_timestamp": self._timestamps[0],
+                "wrist_timestamp": self._timestamps[1],
+                "roi_timestamp": self._timestamps[2],
+                "stream_names": tuple(s.name for s in self._streams)
+                or ("Base RGB", "Wrist RGB", "Base ROI"),
+                "stream_descriptions": tuple(s.description for s in self._streams),
             }
 
     def snapshot_ready(self) -> bool:
+        return not self.readiness_error()
+
+    def readiness_error(self) -> str:
         cfg = self._dataset_config
         max_age = float(cfg["camera_max_age_s"])
         max_skew = float(cfg["camera_max_skew_s"])
         now = time.monotonic()
         with self._lock:
-            return (
-                self._wrist_rgb is not None
-                and self._base_rgb is not None
-                and self._base_roi_rgb is not None
-                and 0 <= now - self._wrist_timestamp <= max_age
-                and 0 <= now - self._base_timestamp <= max_age
-                and abs(self._wrist_timestamp - self._base_timestamp)
-                <= max_skew
-            )
+            for index in (1, 0, 2):
+                name = self._names[index]
+                if self._images[index] is None:
+                    return f"{name}尚无 RGB 画面，请启动相机"
+                age = now - self._timestamps[index]
+                if not 0 <= age <= max_age:
+                    reason = "帧过期" if age > max_age else "帧时间异常"
+                    return (
+                        f"{name}相机{reason}（时龄 {age:.2f}s，阈值 {max_age:.2f}s）；"
+                        "请停止后重新启动相机"
+                    )
+            skew = max(self._timestamps) - min(self._timestamps)
+            if skew > max_skew:
+                return (
+                    f"相机画面不同步（相差 {skew:.2f}s，阈值 {max_skew:.2f}s）；"
+                    "持续异常时请停止后重新启动相机"
+                )
+        return ""
 
     def __call__(self) -> dict[str, Any]:
         cfg = self._dataset_config
         sample = self._teleop_engine.dataset_sample()
-
         with self._lock:
-            wrist = self._wrist_rgb
-            wrist_timestamp = self._wrist_timestamp
-            base = self._base_rgb
-            roi = self._base_roi_rgb
-            base_timestamp = self._base_timestamp
-
-        if wrist is None:
-            raise RuntimeError(
-                "腕部 D435 尚无 RGB 图像，请先启动 wrist camera"
-            )
-        if base is None or roi is None:
-            raise RuntimeError(
-                "基座 D435 尚无完整图/ROI 图像，请先启动 base camera"
-            )
-
+            images = tuple(self._images)
+            timestamps = tuple(self._timestamps)
+        for index in (1, 0, 2):
+            if images[index] is None:
+                raise RuntimeError(f"{self._names[index]}尚无 RGB 图像，请先启动相机")
         now = time.monotonic()
         max_age = float(cfg["camera_max_age_s"])
-        max_skew = float(cfg["camera_max_skew_s"])
-        wrist_age = now - wrist_timestamp
-        base_age = now - base_timestamp
-        skew = abs(wrist_timestamp - base_timestamp)
-
+        skew = max(timestamps) - min(timestamps)
         quality = sample.setdefault("quality", {})
         quality.update(
-            {
-                "camera_skew_s": skew,
-                "wrist_age_s": wrist_age,
-                "base_age_s": base_age,
-                "wrist_timestamp": wrist_timestamp,
-                "base_timestamp": base_timestamp,
-                "wrist_age_exceeded": float(wrist_age > max_age),
-                "base_age_exceeded": float(base_age > max_age),
-                "camera_skew_exceeded": float(skew > max_skew),
-            }
+            camera_skew_s=skew, camera_skew_exceeded=float(skew > float(cfg["camera_max_skew_s"]))
         )
-        sample['image_base_rgb'] = base
-        sample['image_wrist_rgb'] = wrist
-        sample['image_roi_rgb'] = roi
+        for name, timestamp in zip(("base", "wrist", "roi"), timestamps, strict=True):
+            age = now - timestamp
+            quality.update(
+                {
+                    f"{name}_timestamp": timestamp,
+                    f"{name}_age_s": age,
+                    f"{name}_age_exceeded": float(not 0 <= age <= max_age),
+                }
+            )
+        sample.update(zip(SAMPLE_IMAGE_KEYS, images, strict=True))
+        if self._streams:
+            sample["camera_streams"] = self._metadata
         return sample

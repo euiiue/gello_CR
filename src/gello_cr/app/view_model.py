@@ -26,6 +26,8 @@ _WORKFLOW_LABELS = {
     WorkflowState.RECORDING: "RECORDING",
     WorkflowState.FAULT: "FAULT",
     WorkflowState.ESTOP: "ESTOP",
+    WorkflowState.RETURNING_HOME: "RETURNING_HOME",
+    WorkflowState.DAGGER_RUNNING: "DAGGER_RUNNING",
 }
 
 
@@ -47,6 +49,9 @@ class ApplicationViewModel:
     saved_episodes: int
     quality_needs_review: bool
     policy: WorkflowUiPolicy
+    dagger_phase: str = ""
+    dagger_root: str = ""
+    dagger_expert_frames: int = 0
 
 
 def _text(value: Any) -> str:
@@ -70,6 +75,8 @@ def _headline(
     episode_pending: bool,
     buffered_frames: int,
 ) -> str:
+    if state is WorkflowState.RETURNING_HOME:
+        return "机械臂正在回 HOME · 可按紧急停止中断"
     if state is WorkflowState.ESTOP:
         return "ESTOP：等待人工复位"
     if state is WorkflowState.FAULT:
@@ -84,6 +91,8 @@ def _headline(
         return "RECORDING：等待 Episode 状态收敛"
     if state is WorkflowState.TELEOP_RUNNING:
         return "TELEOP_RUNNING：主从跟随运行中"
+    if state is WorkflowState.DAGGER_RUNNING:
+        return "DAgger 运行中 · 空格切换专家接管 / 模型控制"
     if state is WorkflowState.ROBOT_ENABLED:
         return "ROBOT_ENABLED：机器人已使能，跟随未启动"
     if state is WorkflowState.CONNECTED:
@@ -152,4 +161,7 @@ def build_application_view_model(
             episode_active=episode_active,
             episode_pending=episode_pending,
         ),
+        dagger_phase=str(runtime.get("dagger", {}).get("phase", "")),
+        dagger_root=str(runtime.get("dagger", {}).get("root", "")),
+        dagger_expert_frames=int(runtime.get("dagger", {}).get("expert_frames", 0)),
     )

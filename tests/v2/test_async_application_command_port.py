@@ -11,6 +11,7 @@ from gello_cr.core.state_machine import Command, WorkflowState
 from gello_cr.ui.command_port import (
     AsyncApplicationCommandPort,
     CommandPortClosed,
+    CommandPortError,
     CommandRequest,
 )
 
@@ -138,7 +139,8 @@ def test_close_discards_pending_normal_commands() -> None:
     assert first_started.wait(1.0)
     port.submit(CommandRequest.create(Command.POWER_ON))
 
-    port.close(timeout=0.0)
+    with pytest.raises(CommandPortError, match="尚未退出"):
+        port.close(timeout=0.0)
     release.set()
     time.sleep(0.05)
 

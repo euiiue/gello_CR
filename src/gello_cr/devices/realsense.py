@@ -25,6 +25,17 @@ import numpy as np
 from gello_cr.core.contracts import CameraSnapshot
 
 
+def discover_realsense_cameras() -> list[dict[str, str]]:
+    """Enumerate available RGB devices without starting any camera pipeline."""
+    import pyrealsense2 as rs
+
+    return [
+        {"serial": device.get_info(rs.camera_info.serial_number),
+         "name": device.get_info(rs.camera_info.name)}
+        for device in rs.context().query_devices()
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class RealSenseRgbConfig:
     serial: str

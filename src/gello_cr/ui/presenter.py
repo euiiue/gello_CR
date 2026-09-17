@@ -50,6 +50,7 @@ class OperatorUiPresenter:
         self._events = ApplicationEventBuffer(capacity=event_capacity)
         self._unsubscribe = service.subscribe(self._events.push)
         self._closed = False
+        self.dataset_root = ""
 
     @property
     def closed(self) -> bool:
@@ -61,6 +62,7 @@ class OperatorUiPresenter:
 
         runtime = dict(self._runtime_snapshot())
         recorder = dict(self._recorder_snapshot())
+        self.dataset_root = str(recorder.get("root", ""))
 
         readiness_source = self._readiness_snapshot
         readiness = OperatorReadiness.from_mapping(

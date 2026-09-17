@@ -106,6 +106,21 @@ def test_success_save_is_forbidden_in_safe_state(safe_state) -> None:
     assert service.state is safe_state
 
 
+def test_success_episode_can_be_saved_from_robot_enabled_after_home() -> None:
+    service, recorder = _bound_service(
+        WorkflowState.ROBOT_ENABLED,
+        WorkflowState.ROBOT_ENABLED,
+    )
+    service.dispatch(
+        Command.SAVE_SUCCESS,
+        {"notes": "completed before home"},
+    )
+    assert recorder.calls == [
+        ("save", "success", "completed before home")
+    ]
+    assert service.state is WorkflowState.ROBOT_ENABLED
+
+
 def test_estop_from_recording_keeps_robot_enabled_recovery_target() -> None:
     machine = WorkflowStateMachine(
         state=WorkflowState.RECORDING,

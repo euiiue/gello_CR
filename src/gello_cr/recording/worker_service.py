@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from gello_cr.data_contract import ACTION_DIM, IMAGE_SIZE, recording_fields
+from gello_cr.data_contract import ACTION_DIM, recording_fields
 
 from .protocol import receive_packet, send_packet
 from .schema import LEROBOT_IMAGE_FEATURE_KEYS, dataset_features
@@ -72,15 +72,15 @@ class WorkerDatasetService:
         fps = int(request["fps"])
         height = int(request["height"])
         width = int(request["width"])
-        if (height, width) != tuple(IMAGE_SIZE):
-            raise ValueError("PI0.5 recording image size must be 224x224")
+        if any(value < 2 or value > 2160 or value % 2 for value in (height, width)):
+            raise ValueError("Recording image height/width must be even and within 2..2160")
 
         self.recording_mode = request.get("recording_mode", "tcp")
         self.state_fields, _ = recording_fields(self.recording_mode)
         encoder = self._encoder_factory(
             vcodec="h264",
             pix_fmt="yuv420p",
-            crf=28,
+            crf=18,
             preset="fast",
             g=fps,
         )
@@ -166,9 +166,13 @@ class WorkerDatasetService:
         collection["episode_index"] = self.saved_episodes
         collection["frame_count"] = self.buffered_frames
         collection["samples"] = self.sample_metadata
-        collection["image_streams"] = dict(zip(
-            ("Base RGB", "Wrist RGB", "Base ROI"), LEROBOT_IMAGE_FEATURE_KEYS
-        ))
+        streams = collection.get("camera_streams")
+        collection["image_streams"] = (
+            {stream["name"]: stream["feature_key"] for stream in streams}
+            if streams else dict(zip(
+                ("Base RGB", "Wrist RGB", "Base ROI"), LEROBOT_IMAGE_FEATURE_KEYS, strict=True
+            ))
+        )
         (
             collection_dir
             / f"episode_{self.saved_episodes:06d}.json"

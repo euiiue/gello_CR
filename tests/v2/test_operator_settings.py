@@ -123,6 +123,40 @@ def test_dialog_does_not_change_any_values_when_untouched(dialog):
     assert widget._candidate() == widget.settings.data
 
 
+def test_camera_window_selection_round_trips_and_preserves_unselected_settings(dialog):
+    widget, app = dialog
+    name, serial, mode, roi = widget.camera_editors[2]
+    name.setText("操作区特写")
+    serial.setEditText("new-camera")
+    mode.setCurrentIndex(mode.findData("roi"))
+    for edit, value in zip(roi, (0.1, 0.2, 0.8, 0.9), strict=True):
+        edit.setText(str(value))
+    widget._show_cameras([{"serial": "new-camera", "name": "D435"}], "")
+    assert serial.currentText() == "new-camera · D435"
+    widget._save()
+    app.processEvents()
+    assert widget.saved
+    stored = TeleopConfigStore(widget.settings.path).data
+    assert stored['dataset']['camera_streams'][2] == {
+        'name': '操作区特写', 'serial': 'new-camera', 'mode': 'roi', 'roi_norm': [0.1, 0.2, 0.8, 0.9]
+    }
+    assert stored['dataset']['image_size'] == [480, 640]
+    assert stored['robot'] == widget.settings.data['robot']
+
+
+def test_invalid_roi_in_selected_window_is_not_saved(dialog):
+    widget, _ = dialog
+    before = widget.settings.path.read_bytes()
+    _, _, mode, roi = widget.camera_editors[2]
+    mode.setCurrentIndex(mode.findData('roi'))
+    roi[0].setText('0.9')
+    roi[2].setText('0.1')
+    widget._save()
+    assert not widget.saved
+    assert 'ROI' in widget.error_label.text()
+    assert widget.settings.path.read_bytes() == before
+
+
 def test_action_selection_save_reaches_both_runtime_mapping_modes(dialog):
     from PySide6.QtWidgets import QDialogButtonBox
 

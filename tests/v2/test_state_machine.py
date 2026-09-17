@@ -45,3 +45,16 @@ def test_disconnect_is_rejected_while_recording() -> None:
     assert not workflow.can(Command.DISCONNECT)
     with pytest.raises(InvalidTransition):
         workflow.apply(Command.DISCONNECT)
+
+
+def test_home_then_save_success_stays_robot_enabled() -> None:
+    # HOME interrupts a recording but keeps the buffered Episode pending save.
+    workflow = WorkflowStateMachine(WorkflowState.RECORDING)
+    assert workflow.apply(Command.RETURN_HOME) is WorkflowState.RETURNING_HOME
+    assert workflow.apply(Command.HOME_COMPLETED) is WorkflowState.ROBOT_ENABLED
+    assert workflow.apply(Command.SAVE_SUCCESS) is WorkflowState.ROBOT_ENABLED
+
+
+def test_save_success_from_robot_enabled_is_not_a_full_collection_transition() -> None:
+    workflow = WorkflowStateMachine(WorkflowState.ROBOT_ENABLED)
+    assert workflow.apply(Command.SAVE_SUCCESS) is WorkflowState.ROBOT_ENABLED

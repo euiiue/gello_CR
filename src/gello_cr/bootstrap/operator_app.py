@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gello_cr.devices.camera_streams import resolve_camera_streams
 from gello_cr.ui.backend import OperatorBackend
 
 from .camera_service import CameraPollingService
+from .dagger import DaggerBindings
 from .preparation import (
     OperatorPreparationBindings,
     OperatorReadinessProvider,
@@ -28,18 +31,26 @@ class OperatorApplication:
     cameras: CameraPollingService
     readiness: OperatorReadinessProvider
     preparation_bindings: OperatorPreparationBindings
+    dagger: DaggerBindings | None = None
 
     _closed_resources: set[str] = field(default_factory=set, init=False)
 
-    def close(self, timeout: float = 1.0) -> None:
+    def close(self, timeout: float = 30.0, *, save_pending: bool = False) -> None:
         dataset = self.runtime.recorder.snapshot()
-        if dataset.get("episode_active") or dataset.get("buffered_frames", 0):
+        if not save_pending and (dataset.get("episode_active") or dataset.get("buffered_frames", 0)):
             raise RuntimeError("Episode 未处理：请先停止录制并明确保存或丢弃，再退出")
-        if self.backend.command_port.pending_commands:
-            raise RuntimeError("命令正在执行，请等待完成后退出；F12 软件停止仍可用")
+        if "commands" not in self._closed_resources:
+            self.backend.command_port.stop_accepting()
+            self.runtime.teleop_engine.shutdown(close_devices=False)
+            self.backend.command_port.close(timeout=timeout)
+            self._closed_resources.add("commands")
+        if save_pending:
+            self.runtime.recorder.stop_episode()
+            if self.runtime.recorder.snapshot().get("buffered_frames", 0):
+                self.runtime.recorder.save_episode("failure", "退出程序时保留未完成 Episode")
         errors = []
         steps = [
-            ("commands", lambda: self.backend.command_port.close(timeout=timeout)),
+            *([("dagger", self.dagger.close)] if self.dagger is not None else []),
             ("runtime", self.runtime.close),
             ("cameras", self.cameras.close),
             ("recorder", self.runtime.recorder.close),
@@ -63,6 +74,7 @@ def build_operator_application(
     repo_root: str | Path,
     *,
     factory: Any | None = None,
+    dagger_options: dict | None = None,
 ) -> OperatorApplication:
     paths = RuntimeFactoryPaths.from_repo(repo_root)
     runtime_factory = factory or ConcreteRuntimeFactory(paths)
@@ -70,10 +82,9 @@ def build_operator_application(
 
     dataset_cfg = runtime.store.data["dataset"]
     cameras = CameraPollingService(
-        wrist_camera=runtime.wrist_camera,
-        base_camera=runtime.base_camera,
+        cameras=runtime.camera_devices,
+        streams=resolve_camera_streams(dataset_cfg),
         sample_source=runtime.sample_source,
-        base_roi_norm=dataset_cfg["base_roi_norm"],
         poll_hz=30.0,
     )
     readiness = OperatorReadinessProvider(
@@ -105,10 +116,21 @@ def build_operator_application(
         cameras=cameras,
     ).install()
 
+    dagger = DaggerBindings(
+        runtime,
+        backend.service,
+        readiness,
+        **{
+            "openpi_root": os.environ.get("GELLO_CR_OPENPI_ROOT", str(paths.repo_root)),
+            **(dagger_options or {}),
+        },
+    ).install()
+
     return OperatorApplication(
         runtime=runtime,
         backend=backend,
         cameras=cameras,
         readiness=readiness,
         preparation_bindings=preparation_bindings,
+        dagger=dagger,
     )

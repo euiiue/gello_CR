@@ -39,6 +39,7 @@ try:
         max_command_step_violation,
         max_tracking_error_violation,
     )
+    from gello_cr.devices.camera_streams import resolve_camera_streams
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -59,6 +60,7 @@ except ModuleNotFoundError as exc:
         max_command_step_violation,
         max_tracking_error_violation,
     )
+    from gello_cr.devices.camera_streams import resolve_camera_streams
     from gello_cr.devices.gello import GelloConfig, GelloDevice
     from gello_cr.devices.nrc_robot import NrcRobotSession, NrcServoTransition
     from gello_cr.devices.o6 import O6Config, O6Device
@@ -148,10 +150,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "gello": {
         "port": "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB6W7LM-if00-port0",
         "baudrate": 57600,
-        "software_root": str(Path(__file__).resolve().parent / "TESTMaster_GELLO/gello_software-main"),
+        "software_root": str(Path(__file__).resolve().parent / "vendor/gello"),
         "control_mode": "joint",
         "joint_scale": 1.0,
-        "kinematics_urdf": str(Path(__file__).resolve().parent / "TESTMaster_GELLO/gello_software-main/gello/factr/urdf/yam_active_gello/robot.urdf"),
+        "kinematics_urdf": str(Path(__file__).resolve().parent / "vendor/gello/gello/factr/urdf/yam_active_gello/robot.urdf"),
         "xyz_axis_map": [
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
@@ -235,11 +237,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "dataset": {
         "recording_mode": "tcp",
-        "root": "/home/ace/datasets/cr5_o6_low_latency_test",
+        "root": "~/datasets/cr5_o6_low_latency_test",
         "repo_prefix": "ace/cr5_o6",
         "task": "Pick up the object and place it in the target container.",
         "fps": 20,
-        "image_size": [224, 224],
+        "image_size": [480, 640],
         "camera_max_age_s": 0.5,
         "camera_max_skew_s": 0.1,
         "action_max_age_s": 0.25,
@@ -247,7 +249,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wrist_camera_serial": "317222074617",
         "base_camera_serial": "254622075848",
         "base_roi_norm": [0.37, 0.56, 0.55, 0.79],
-        "worker_python": "/home/ace/miniconda3/envs/lerobot/bin/python",
+        "camera_streams": None,
+        "worker_python": "~/miniconda3/envs/lerobot/bin/python",
     },
     "shortcuts": {
         "prepare": "F5",
@@ -345,8 +348,13 @@ class TeleopConfigStore:
                 self.data = previous
                 raise
 
-    @staticmethod
-    def _validate(data: dict[str, Any]) -> None:
+    def resolve_path(self, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.path.parent / path
+        return path.resolve()
+
+    def _validate(self, data: dict[str, Any]) -> None:
         master_type = data["master"]["type"]
         if master_type not in ("roarm", "inverse3", "gello"):
             raise ValueError("主臂类型必须是 roarm、inverse3 或 gello")
@@ -431,10 +439,10 @@ class TeleopConfigStore:
             )
         if not str(gello["kinematics_urdf"]).strip():
             raise ValueError("GELLO kinematics_urdf 不能为空")
-        if gello["control_mode"] != "joint" and not Path(
-            str(gello["kinematics_urdf"])
-        ).expanduser().is_file():
-            raise ValueError("GELLO TCP/XYZ 模式的 URDF 文件不存在")
+        if gello["control_mode"] != "joint":
+            urdf_path = self.resolve_path(gello["kinematics_urdf"])
+            if not urdf_path.is_file():
+                raise ValueError("GELLO TCP/XYZ 模式的 URDF 文件不存在")
         xyz_axis_map = gello["xyz_axis_map"]
         if (
             not isinstance(xyz_axis_map, list)
@@ -577,7 +585,7 @@ class TeleopConfigStore:
         if (
             not isinstance(image_size, list)
             or len(image_size) != 2
-            or any(int(value) <= 0 for value in image_size)
+            or any(int(value) < 2 or int(value) > 2160 or int(value) % 2 for value in image_size)
         ):
             raise ValueError("LeRobot image_size 必须是 [height, width]")
         if float(dataset["camera_max_age_s"]) <= 0:
@@ -597,6 +605,7 @@ class TeleopConfigStore:
         x1, y1, x2, y2 = [float(value) for value in roi]
         if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
             raise ValueError("base_roi_norm 必须满足 0<=x1<x2<=1 且 0<=y1<y2<=1")
+        resolve_camera_streams(dataset)
         if not str(dataset["worker_python"]).strip():
             raise ValueError("LeRobot worker_python 不能为空")
         shortcuts = data["shortcuts"]
@@ -1784,6 +1793,8 @@ class TeleopEngine:
         self._replay_stop = threading.Event()
         self._shutdown_requested = threading.Event()
         self._follow_thread: Optional[threading.Thread] = None
+        self.external_control = None
+        self._last_dagger_snapshot = {}
         self._preset_thread: Optional[threading.Thread] = None
         self._record_thread: Optional[threading.Thread] = None
         self._replay_thread: Optional[threading.Thread] = None
@@ -1798,6 +1809,9 @@ class TeleopEngine:
         self._o6_action_active = False
         self._o6_action_name = ""
         self._dataset_target_tcp_controller: Optional[
+            tuple[float, float, float, float, float, float]
+        ] = None
+        self._dataset_target_joints_deg: Optional[
             tuple[float, float, float, float, float, float]
         ] = None
         self._dataset_action_timestamp = 0.0
@@ -1853,8 +1867,7 @@ class TeleopEngine:
         slot_number = int(slot)
         if slot_number not in (1, 2, 3):
             raise ValueError("轨迹槽位必须是 1、2 或 3")
-        configured = Path(str(self.store.data["replay"]["file"])).expanduser()
-        path = configured if configured.is_absolute() else self.store.path.parent / configured
+        path = self.store.resolve_path(self.store.data["replay"]["file"])
         if slot_number == 1:
             return path
         return path.with_name(f"{path.stem}_{slot_number}{path.suffix}")
@@ -2018,6 +2031,18 @@ class TeleopEngine:
             self._dataset_target_tcp_controller = controller_values
             self._dataset_action_timestamp = time.monotonic()
 
+    def _set_dataset_target_joints(self, joints_deg: Sequence[Any]) -> None:
+        # 关节记录模式下，HOME 回位期间没有 GELLO 跟随目标；这里把 HOME 关节
+        # 目标（SDK 角度单位）当作 action，让 dataset_sample() 能继续出样本。
+        controller_values = tuple(float(value) for value in joints_deg[:6])
+        if len(controller_values) != 6 or any(
+            not math.isfinite(value) for value in controller_values
+        ):
+            raise ValueError("CR5 数据集 joint action 必须是 6 个有限数值")
+        with self._state_lock:
+            self._dataset_target_joints_deg = controller_values
+            self._dataset_action_timestamp = time.monotonic()
+
     def start_follow(
         self,
         _resume_from_episode_replay: bool = False,
@@ -2058,6 +2083,7 @@ class TeleopEngine:
             raise RuntimeError("恢复或轨迹重放正在执行，请等待完成")
         if self._follow_thread is not None and self._follow_thread.is_alive():
             return
+        self.finish_external_control()
         if self.robot.servo_state() != 3:
             raise RuntimeError("CR5 尚未上电运行，请先使能机器人")
         if self._shutdown_requested.is_set():
@@ -2178,8 +2204,11 @@ class TeleopEngine:
             raise RuntimeError("CR5 反馈必须包含 7 个关节值")
         gello_cfg = self.store.data["gello"]
         gello_mode = str(gello_cfg.get("control_mode", "joint"))
+        urdf_path = Path(str(gello_cfg["kinematics_urdf"])).expanduser()
+        if not urdf_path.is_absolute():
+            urdf_path = self.store.path.parent / urdf_path
         kinematics = (
-            GelloKinematics(gello_cfg["kinematics_urdf"])
+            GelloKinematics(urdf_path)
             if gello_mode != "joint"
             else None
         )
@@ -2193,6 +2222,7 @@ class TeleopEngine:
             self._follow_stop.clear()
             self._gello_telemetry = None
             self._dataset_target_tcp_controller = None
+            self._dataset_target_joints_deg = None
             self._dataset_action_timestamp = 0.0
         try:
             if getattr(self.robot, "motion_mode", "servoj") != "movej":
@@ -2958,6 +2988,47 @@ class TeleopEngine:
             if not error and self.state == "following":
                 self._set_state("idle")
 
+    def start_external_control(self, controller, stop_generation: int) -> None:
+        """Reserve the existing motion producer slot for the DAgger arbiter."""
+        with self._state_lock:
+            if self._state != "idle" or self._home_lock.locked():
+                raise RuntimeError("请先停止主从跟随或回位，再启动 DAgger")
+            if self._follow_thread is not None and self._follow_thread.is_alive():
+                raise RuntimeError("已有运动线程，禁止并行启动 DAgger")
+            if self._shutdown_requested.is_set() or self._stop_generation != stop_generation:
+                raise RuntimeError("DAgger 启动已被停止或退出取消")
+            self.external_control = controller
+            self._follow_stop.clear()
+        controller.robot.start_control()
+        with self._state_lock:
+            cancelled = self._stop_generation != stop_generation or self._follow_stop.is_set()
+            if not cancelled:
+                self._state = "dagger"
+                self._last_error = ""
+                self._follow_thread = threading.Thread(
+                    target=self._external_control_loop, args=(controller,),
+                    name="DAgger-Control", daemon=True,
+                )
+                self._follow_thread.start()
+        if cancelled:
+            controller.request_stop()
+            raise RuntimeError("DAgger 启动已被停止取消")
+
+    def _external_control_loop(self, controller) -> None:
+        try:
+            controller.run(stop_event=self._follow_stop)
+        except Exception as exc:
+            self._set_state("fault", str(exc))
+            self._event("error", f"DAgger 已停止：{exc}")
+        finally:
+            try:
+                controller.request_stop()
+            except Exception as exc:
+                self._set_state("fault", str(exc))
+                self._event("error", f"DAgger 停止失败：{exc}")
+            if self.state == "dagger":
+                self._set_state("idle")
+
     def stop_follow(self, reason: str = "人工停止") -> None:
         if self.state in ("replay", "episode_replay") and self.replaying:
             # A general stop-follow request must not silently restart following.
@@ -2965,6 +3036,8 @@ class TeleopEngine:
             self._event("info", f"关节重放已停止：{reason}")
             return
         self._follow_stop.set()
+        if self.external_control is not None:
+            self.external_control.request_stop()
         thread = self._follow_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
@@ -2987,9 +3060,21 @@ class TeleopEngine:
             message = "XYZ 跟随线程未能在 2 秒内停止"
             self._set_state("fault", message)
             raise TimeoutError(message)
+        self.finish_external_control()
         if self.state in ("following", "master_free"):
             self._set_state("idle")
         self._event("info", f"跟随已停止：{reason}")
+
+    def finish_external_control(self) -> None:
+        """Finalize DAgger only after its motion producer has stopped."""
+        controller = self.external_control
+        if controller is None:
+            return
+        if self._follow_thread is not None and self._follow_thread.is_alive():
+            raise RuntimeError("DAgger 运动线程仍在运行，不能关闭记录器")
+        controller.stop()
+        self._last_dagger_snapshot = controller.snapshot()
+        self.external_control = None
 
     def release_master_hold_slave(self) -> None:
         """Hold CR5/O6 at their current state and leave the master free."""
@@ -4072,9 +4157,12 @@ class TeleopEngine:
         return preset
 
     def return_home(self, stop_recording: Callable[[], None]) -> None:
-        """Preempt motion, retain the Episode, then return only the robot to HOME.
+        """Preempt motion, return the robot and O6 to HOME, then end the Episode.
 
-        Runs on a dedicated GUI worker; software stop can cancel it at any stage.
+        The active Episode keeps sampling throughout the HOME motion so the
+        return trajectory is recorded too; ``stop_recording`` is invoked only
+        after the robot has settled at HOME. Runs on a dedicated GUI worker;
+        software stop can cancel it at any stage.
         """
         if not self._home_lock.acquire(blocking=False):
             raise RuntimeError("HOME 回位正在执行")
@@ -4088,6 +4176,17 @@ class TeleopEngine:
             target = [float(value) for value in preset["robot_joints_deg"]]
             if len(target) != 7 or not all(math.isfinite(v) for v in target):
                 raise ValueError("HOME 关节目标必须是 7 个有限数值（含 SDK 占位轴）")
+            o6_cfg = self.store.data["o6"]
+            o6_target = _six_uint8(o6_cfg["actions"][o6_cfg["open_action"]], "HOME 张开手")
+            o6_homing = self.o6.connected
+            # 尽早设置录制动作目标。关节录制在 state 离开 "following" 后只能依赖
+            # HOME 关节目标；必须在状态切换前设好，否则回位窗口内 dataset_sample()
+            # 会抛「关节记录需要 GELLO 关节跟随」而打断录制。
+            home_tcp = preset.get("robot_tcp")
+            if home_tcp is not None:
+                self._set_dataset_target_tcp([float(value) for value in home_tcp])
+            if self.store.data["dataset"]["recording_mode"] == "joint":
+                self._set_dataset_target_joints(target)
             with self._state_lock:
                 self._stop_generation += 1
                 generation = self._stop_generation
@@ -4106,7 +4205,8 @@ class TeleopEngine:
                     thread.join(timeout=3.0)
                     if thread.is_alive():
                         raise TimeoutError(f"{thread.name} 未停止，禁止 HOME 回位")
-            stop_recording()
+            self.finish_external_control()
+            # 不在这里停止 Episode：HOME 回位过程本身也要被录制，等回位完成后再 stop_recording()。
             with self._state_lock:
                 if self._stop_generation != generation or self._shutdown_requested.is_set():
                     raise RuntimeError("HOME 回位已被停止")
@@ -4122,31 +4222,64 @@ class TeleopEngine:
             if self._preset_stop.is_set() or self._stop_generation != generation:
                 raise RuntimeError("HOME 回位已被停止")
             cfg = self.store.data["preset"]
-            self._event("info", "机械臂回 HOME：其他运动已停止，已录数据保留")
+            self._event(
+                "info",
+                "机械臂回 HOME：其他运动已停止，录制继续，回位轨迹也会被保存"
+                + ("；O6 同步回 HOME" if o6_homing else "；O6 未连接，仅机械臂回位"),
+            )
+            if o6_homing:
+                self.o6.set_profile(o6_cfg["speed"], o6_cfg["torque"])
+                self.o6.set_target(o6_target)
             robot.movej(target, float(cfg["robot_velocity_percent"]),
                         float(cfg["robot_acc_percent"]), float(cfg["robot_dec_percent"]))
             deadline = time.monotonic() + float(cfg["timeout_s"])
+            robot_ok = False
+            o6_ok = not o6_homing
             while True:
                 if self._preset_stop.is_set() or self._stop_generation != generation:
                     raise RuntimeError("HOME 回位已被停止")
                 current = robot.joint_position()
-                if max(abs(a - b) for a, b in zip(current[:6], target[:6])) <= 1.0:
+                robot_ok = max(
+                    abs(a - b) for a, b in zip(current[:6], target[:6])
+                ) <= 1.0
+                if o6_homing:
+                    current_o6, current_fault, _ = self.o6.latest()
+                    if current_fault and any(current_fault):
+                        raise RuntimeError(f"O6 故障: {current_fault}")
+                    o6_ok = bool(
+                        current_o6
+                        and max(
+                            abs(a - b) for a, b in zip(current_o6, o6_target)
+                        ) <= 6
+                    )
+                if robot_ok and o6_ok:
                     break
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("机械臂未在规定时间内到达 HOME")
+                    raise TimeoutError("机械臂或 O6 未在规定时间内到达 HOME")
                 self._preset_stop.wait(0.05)
             robot.stop_motion()
             if not robot.wait_until_motion_stopped(5.0, stop_event=self._preset_stop):
                 raise RuntimeError("HOME 到达后停止未确认")
             if max(abs(a - b) for a, b in zip(robot.joint_position()[:6], target[:6])) > 1.0:
                 raise RuntimeError("机械臂停止后偏离 HOME")
+            # 回位完成，结束录制：HOME 轨迹已包含在 Episode 中，随后保存为 pending。
+            stop_recording()
             with self._state_lock:
                 if self._stop_generation != generation or self._preset_stop.is_set():
                     raise RuntimeError("HOME 回位已被停止")
+                self._hand_action_stop.set()
+                self._o6_manual_override = False
+                self._o6_action_name = ""
                 self._state = "idle"
                 self._last_error = ""
-            self._event("info", "机械臂已回 HOME；保持停止，请手动重新启动跟随")
+            self._event("info", "机械臂与 O6 已回 HOME；录制已结束，请保存 Episode")
         except Exception as exc:
+            # 回位失败时也结束录制，避免关节录制在 fault 态继续产出 HOME 目标的
+            # 无效样本。尽力而为，不掩盖原始异常。
+            try:
+                stop_recording()
+            except Exception:
+                pass
             if self.state != "closed":
                 self._set_state("fault", str(exc))
             if robot is not None:
@@ -4366,6 +4499,11 @@ class TeleopEngine:
             self._record_stop.set()
             self._replay_stop.set()
         errors: list[str] = []
+        if self.external_control is not None:
+            try:
+                self.external_control.request_stop()
+            except Exception as exc:
+                errors.append(f"DAgger: {exc}")
         if self.robot is not None:
             try:
                 self.robot.stop_motion()
@@ -4426,8 +4564,10 @@ class TeleopEngine:
         positions.  The action is the shortest TCP delta from current feedback
         to the last command sent by follow/preset/replay plus the last O6 RS485
         target. Joint mode records six feedback joints and six absolute sent
-        joint targets in radians, each followed by O6 values. It requires active
-        GELLO joint following. SDK success is not an execution acknowledgement.
+        joint targets in radians, each followed by O6 values; it normally
+        requires active GELLO joint following, except during a HOME return where
+        the saved HOME joint target supplies the action. SDK success is not an
+        execution acknowledgement.
         """
         state = self.state
         if state == "closed":
@@ -4445,11 +4585,19 @@ class TeleopEngine:
         with self._state_lock:
             telemetry = self._gello_telemetry
             target_tcp = self._dataset_target_tcp_controller
+            target_joints_deg = self._dataset_target_joints_deg
             action_timestamp = self._dataset_action_timestamp
         quality = {}
+        # 关节记录有两个合法来源：GELLO 关节跟随的实时目标，或 HOME 回位期间的
+        # HOME 关节目标。回位期间 state != "following"，需要允许后者继续出样本。
+        home_joint_action = (
+            recording_mode == "joint"
+            and not gello_joint_follow
+            and target_joints_deg is not None
+        )
         if recording_mode == "joint" and (
             not gello_joint_follow or telemetry is None or not telemetry["sent_count"]
-        ):
+        ) and not home_joint_action:
             raise RuntimeError("关节记录需要 GELLO 关节跟随及已下发目标；请先启动关节跟随")
         if gello_joint_follow and (telemetry is None or not telemetry["sent_count"]):
             quality["gello_telemetry_missing"] = 1.0
@@ -4543,7 +4691,10 @@ class TeleopEngine:
         action = delta_xyz_m + delta_rpy_rad + [float(value) for value in o6_target]
         if recording_mode == "joint":
             observation_state = observation_state[:6] + observation_state[12:]
-            action = [math.radians(value) for value in telemetry["target_full_deg"][:6]] + [
+            joint_targets_deg = (
+                target_joints_deg if home_joint_action else telemetry["target_full_deg"][:6]
+            )
+            action = [math.radians(value) for value in joint_targets_deg] + [
                 float(value) for value in o6_target
             ]
 
@@ -4589,6 +4740,7 @@ class TeleopEngine:
         return {
             "state": self.state,
             "error": self.last_error,
+            "dagger": self.external_control.snapshot() if self.external_control is not None else self._last_dagger_snapshot,
             "master_type": self.master_type,
             "gello_telemetry": gello_telemetry,
             "master": master,

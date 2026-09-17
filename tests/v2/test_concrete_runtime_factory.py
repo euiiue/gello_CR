@@ -43,6 +43,7 @@ CFG = {
         'worker_python': '/tmp/python', 'repo_prefix': 'local/test',
         'fps': 20, 'image_size': [224,224],
         'wrist_camera_serial': 'wrist', 'base_camera_serial': 'base',
+        'base_roi_norm': [0.1, 0.1, 0.9, 0.9],
         'camera_max_age_s': 0.5, 'camera_max_skew_s': 0.1,
     },
 }
@@ -115,8 +116,8 @@ def test_factory_builds_gello_runtime_without_connecting_hardware(tmp_path) -> N
     assert runtime.teleop_engine.attached == []
     assert runtime.cr3a_lifecycle.device is None
     assert runtime.cr3a_lifecycle.session is None
-    assert runtime.wrist_camera.args
-    assert runtime.base_camera.args
+    assert runtime.camera_devices["wrist"].args
+    assert runtime.camera_devices["base"].args
 
 
 def test_factory_does_not_call_connect_power_or_start_by_source() -> None:
@@ -144,6 +145,45 @@ def test_factory_selects_master_from_config(tmp_path) -> None:
         constructors=constructors(),
     ).build()
     assert runtime.master_controller is runtime.gello_controller
+
+
+def test_factory_resolves_relative_gello_source_from_config_directory(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / 'config' / 'teleop.json'
+    monkeypatch.setitem(CFG['gello'], 'software_root', '../vendor/gello')
+    paths = RuntimeFactoryPaths(
+        repo_root=tmp_path,
+        config_path=config_path,
+        linker_hand_sdk_root=tmp_path / 'hand',
+        nrc_sdk_root=None,
+    )
+
+    runtime = ConcreteRuntimeFactory(
+        paths,
+        constructors=constructors(),
+    ).build()
+
+    assert runtime.gello_controller.kwargs['software_root'] == str(
+        (config_path.parent / '../vendor/gello').resolve()
+    )
+
+
+def test_factory_uses_explicit_data_python_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv('GELLO_CR_DATA_PYTHON', '/tmp/lerobot-python')
+    paths = RuntimeFactoryPaths(
+        repo_root=tmp_path,
+        config_path=tmp_path / 'config.json',
+        linker_hand_sdk_root=tmp_path / 'hand',
+        nrc_sdk_root=None,
+    )
+
+    runtime = ConcreteRuntimeFactory(
+        paths,
+        constructors=constructors(),
+    ).build()
+
+    assert runtime.recorder.kwargs['worker_python'] == '/tmp/lerobot-python'
 
 
 def test_runtime_exposes_application_lifecycle_callbacks(tmp_path) -> None:

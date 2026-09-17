@@ -9,12 +9,14 @@ power_on(), start_follow(), camera start, or recorder start_episode().
 from __future__ import annotations
 
 import importlib
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from gello_cr.app import RuntimeLifecycleCallbacks
+from gello_cr.devices.camera_streams import resolve_camera_streams
 from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
 from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
 
@@ -43,13 +45,13 @@ class RuntimeFactoryPaths:
             if config_path is not None
             else root / 'config' / 'roarm_cr5_teleop.json'
         )
-        nrc_root = root / 'TESTRobot_INEXBOT'
+        nrc_root = root / 'vendor' / 'nrc'
         return cls(
             repo_root=root,
             config_path=config,
             linker_hand_sdk_root=(
                 root
-                / 'TESTHand_LINKERBOT'
+                / 'vendor'
                 / 'linker_hand_python_sdk'
                 / 'LinkerHand'
             ),
@@ -283,8 +285,7 @@ class ConcreteRuntime:
     teleop_engine: Any
     sample_source: RecordingSampleSource
     recorder: Any
-    wrist_camera: Any
-    base_camera: Any
+    camera_devices: dict[str, Any]
     cr3a_lifecycle: Cr3aLifecycle
 
     @property
@@ -351,9 +352,12 @@ class ConcreteRuntimeFactory:
             basis=cfg['inverse3']['basis'],
         )
         gello_cfg = cfg['gello']
+        software_root = Path(gello_cfg['software_root']).expanduser()
+        if not software_root.is_absolute():
+            software_root = self.paths.config_path.parent / software_root
         gello = c.GelloController(
             port=gello_cfg['port'],
-            software_root=gello_cfg['software_root'],
+            software_root=str(software_root.resolve()),
             joint_ids=gello_cfg['joint_ids'],
             joint_offsets=gello_cfg['joint_offsets'],
             joint_signs=gello_cfg['joint_signs'],
@@ -387,32 +391,22 @@ class ConcreteRuntimeFactory:
                 self.event_callback(level, message)
 
         dataset_cfg = cfg['dataset']
-        sample_source = RecordingSampleSource(engine, dataset_cfg)
+        worker_python = os.environ.get('GELLO_CR_DATA_PYTHON') or dataset_cfg['worker_python']
+        streams = resolve_camera_streams(dataset_cfg)
+        sample_source = RecordingSampleSource(engine, dataset_cfg, streams=streams)
         recorder = c.LeRobotEpisodeRecorder(
             sample_provider=sample_source,
             event_callback=runtime_event,
-            worker_python=dataset_cfg['worker_python'],
+            worker_python=worker_python,
             repo_prefix=dataset_cfg['repo_prefix'],
             fps=int(dataset_cfg['fps']),
             image_size=tuple(dataset_cfg['image_size']),
         )
 
-        wrist_camera = c.RealSenseRgbDevice(
-            RealSenseRgbConfig(
-                serial=str(dataset_cfg['wrist_camera_serial']),
-                width=640,
-                height=480,
-                fps=30,
-            )
-        )
-        base_camera = c.RealSenseRgbDevice(
-            RealSenseRgbConfig(
-                serial=str(dataset_cfg['base_camera_serial']),
-                width=640,
-                height=480,
-                fps=30,
-            )
-        )
+        camera_devices = {
+            serial: c.RealSenseRgbDevice(RealSenseRgbConfig(serial=serial))
+            for serial in dict.fromkeys(stream.serial for stream in streams)
+        }
 
         lifecycle = Cr3aLifecycle(
             store=store,
@@ -433,7 +427,6 @@ class ConcreteRuntimeFactory:
             teleop_engine=engine,
             sample_source=sample_source,
             recorder=recorder,
-            wrist_camera=wrist_camera,
-            base_camera=base_camera,
+            camera_devices=camera_devices,
             cr3a_lifecycle=lifecycle,
         )

@@ -5,11 +5,11 @@
 纳博特 `_nrc_host.so` 依赖项目内的 Python 3.12 和 `libpython3.12.so`，请使用：
 
 ```bash
-cd /home/ace/cyf/TEST_PY12
+cd /path/to/gello_CR
 ./run_test_inexbot.sh
 ```
 
-不要直接用系统 `python3`（当前是 Python 3.10）运行。
+启动器使用项目 `.venv/bin/python`，也可用 `GELLO_CR_PYTHON=/path/to/python3.12` 指定兼容的 Python 3.12。
 
 ## 连接顺序
 
@@ -140,8 +140,8 @@ RoArm M5 使用实测张开/闭合端点 `0.7977 / 3.1447 rad`，线性插值到
 ## 无运动测试
 
 ```bash
-cd /home/ace/cyf
-TEST_PY12/bin/python3.12 -m unittest -v TEST_PY12/test_teleop_runtime.py
+cd /path/to/gello_CR
+python3.12 -m unittest -v test_teleop_runtime.py
 ```
 ## LeRobot / PI0.5 Episode 采集
 
@@ -150,7 +150,7 @@ TEST_PY12/bin/python3.12 -m unittest -v TEST_PY12/test_teleop_runtime.py
 启动方式不变：
 
 ```bash
-cd /home/ace/cyf/TEST_PY12
+cd /path/to/gello_CR
 ./run_test_inexbot.sh
 ```
 
@@ -173,16 +173,16 @@ cd /home/ace/cyf/TEST_PY12
 
 三路图像都是 `224x224 uint8 RGB`。RealSense 画面先按 OpenPI 的等比例、居中黑边方式缩放，再用 H.264 CRF 28 实时编码为 MP4；不记录深度图和 640x480 原图。
 
-LeRobot 写入 worker 默认使用
-`/home/ace/miniconda3/envs/lerobot/bin/python`，而 Qt/NRC 仍使用
-`/home/ace/cyf/TEST_PY12/bin/python3.12`。两者通过本地 Unix socket 通信，不会重复打开机械臂或 O6 端口。
+LeRobot 写入 worker 使用 `dataset.worker_python` 指定的 Python；也可设置
+`GELLO_CR_DATA_PYTHON=/path/to/lerobot/python`。Qt/NRC 使用项目 `.venv/bin/python`
+或 `GELLO_CR_PYTHON` 指定的 Python 3.12。两者通过本地 Unix socket 通信，不会重复打开机械臂或 O6 端口。
 
 录制结束后，从数据集目录的 `meta/info.json` 读取 `repo_id`，然后可以先查看 Episode 0：
 
 ```bash
-/home/ace/miniconda3/envs/lerobot/bin/lerobot-dataset-viz \
+"$HOME/miniconda3/envs/lerobot/bin/lerobot-dataset-viz" \
   --repo-id=ace/cr5_o6_时间戳 \
-  --root=/home/ace/datasets/cr5_o6/cr5_o6_时间戳 \
+  --root="$HOME/datasets/cr5_o6/cr5_o6_时间戳" \
   --episode-index=0 \
   --display-compressed-images
 ```
@@ -190,23 +190,23 @@ LeRobot 写入 worker 默认使用
 本地 PI0.5 expert-only 训练命令模板：
 
 ```bash
-cd /home/ace/lerobot
+cd "$HOME/lerobot"
 TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 \
-/home/ace/miniconda3/envs/lerobot/bin/lerobot-train \
-  --policy.path=/home/ace/models/lerobot/pi05_base \
+"$HOME/miniconda3/envs/lerobot/bin/lerobot-train" \
+  --policy.path="$HOME/models/lerobot/pi05_base" \
   --policy.device=cuda \
   --policy.dtype=float32 \
   --policy.train_expert_only=true \
   --policy.freeze_vision_encoder=true \
   --policy.push_to_hub=false \
   --dataset.repo_id=ace/cr5_o6_时间戳 \
-  --dataset.root=/home/ace/datasets/cr5_o6/cr5_o6_时间戳 \
+  --dataset.root="$HOME/datasets/cr5_o6/cr5_o6_时间戳" \
   --dataset.use_imagenet_stats=false \
   --dataset.return_uint8=true \
   --batch_size=1 \
   --num_workers=0 \
   --steps=30000 \
-  --output_dir=/home/ace/outputs/pi05_cr5_o6
+  --output_dir="$HOME/outputs/pi05_cr5_o6"
 ```
 
 `pi05_base` 预训练配置期望 `base_0_rgb`、`left_wrist_0_rgb` 和

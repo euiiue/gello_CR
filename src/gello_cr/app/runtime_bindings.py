@@ -76,6 +76,7 @@ class RuntimeCommandBindings:
             Command.EMERGENCY_STOP: self._emergency_stop,
             Command.RESET_ESTOP: self._reset_estop,
             Command.HOME_COMPLETED: self._home_completed,
+            Command.RETURN_HOME: self._return_home,
         }
         for command, handler in handlers.items():
             self.service.set_handler(command, handler)
@@ -201,6 +202,10 @@ class RuntimeCommandBindings:
     def _home_completed(self, _payload: Mapping[str, Any]) -> None:
         if self.teleop_engine.state != "idle":
             raise RuntimeError("HOME 完成状态已被其他动作或停止覆盖")
+
+    def _return_home(self, _payload: Mapping[str, Any]) -> None:
+        self.teleop_engine.return_home(self.recorder.stop_episode)
+        self._home_completed(_payload)
 
     def _reset_fault(self, _payload: Mapping[str, Any]) -> Any:
         self._require_episode_resolved()

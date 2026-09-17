@@ -61,7 +61,7 @@ class LeRobotEpisodeRecorder:
         self._max_frame_gap_s = 0.0
         self._quality_max: dict[str, float] = {}
         self._last_camera_timestamps: dict[str, float] = {}
-        self._reused_camera_frames = {"wrist": 0, "base": 0}
+        self._reused_camera_frames = {"wrist": 0, "base": 0, "roi": 0}
         self._episode_metadata: dict[str, Any] = {}
         self._last_saved_summary: dict[str, Any] = {}
 
@@ -69,16 +69,20 @@ class LeRobotEpisodeRecorder:
         self.event_callback(level, message)
 
     def _ensure_session(self, base_root: str) -> None:
+        requested_root = Path(base_root).expanduser().resolve()
         with self._lock:
-            if self._client is not None:
+            if self._client is not None and Path(self._session_root).parent == requested_root:
                 return
+            switching = self._client is not None
+        if switching:
+            self.finalize()
         stamp = (
             time.strftime("%Y%m%d_%H%M%S")
             + f"_{int(time.time_ns() % 1_000_000_000):09d}"
         )
         prefix_owner, prefix_name = self.repo_prefix.split("/", 1)
         repo_id = f"{prefix_owner}/{prefix_name}_{stamp}"
-        session_root = Path(base_root).expanduser().resolve() / f"{prefix_name}_{stamp}"
+        session_root = requested_root / f"{prefix_name}_{stamp}"
         client = WorkerClient(
             self.worker_python,
             worker_script=self.worker_script,
@@ -142,10 +146,11 @@ class LeRobotEpisodeRecorder:
             self._max_frame_gap_s = 0.0
             self._quality_max = {}
             self._last_camera_timestamps = {}
-            self._reused_camera_frames = {"wrist": 0, "base": 0}
+            self._reused_camera_frames = {"wrist": 0, "base": 0, "roi": 0}
             self._episode_metadata = {
                 "started_at_unix_s": time.time(),
                 "context": metadata or {},
+                "camera_streams": first_sample.get("camera_streams", []),
             }
             self._episode_stop.clear()
             self._episode_thread = threading.Thread(
@@ -160,7 +165,7 @@ class LeRobotEpisodeRecorder:
     def _validate_sample(self, sample: dict[str, Any]) -> None:
         validate_recording_sample(sample)
         quality = sample.get("quality", {})
-        for flag in ("wrist_age_exceeded", "base_age_exceeded", "camera_skew_exceeded"):
+        for flag in ("wrist_age_exceeded", "base_age_exceeded", "roi_age_exceeded", "camera_skew_exceeded"):
             if quality.get(flag, 0):
                 raise WorkerClientError(f"Cannot start Episode: {flag}")
 
@@ -193,7 +198,7 @@ class LeRobotEpisodeRecorder:
                 self._first_sample_at = sampled_at
             self._last_sample_at = sampled_at
             for key, value in sample.get("quality", {}).items():
-                if key in ("wrist_timestamp", "base_timestamp"):
+                if key in ("wrist_timestamp", "base_timestamp", "roi_timestamp"):
                     if self._last_camera_timestamps.get(key) == value:
                         self._reused_camera_frames[key.split("_")[0]] += 1
                     self._last_camera_timestamps[key] = value
@@ -386,6 +391,7 @@ class LeRobotEpisodeRecorder:
                 or self._quality_max.get("o6_fault_present", 0.0) > 0.0
                 or self._quality_max.get("wrist_age_exceeded", 0.0) > 0.0
                 or self._quality_max.get("base_age_exceeded", 0.0) > 0.0
+                or self._quality_max.get("roi_age_exceeded", 0.0) > 0.0
                 or self._quality_max.get("camera_skew_exceeded", 0.0) > 0.0
             )
             return {

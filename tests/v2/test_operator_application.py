@@ -12,6 +12,9 @@ class Teleop:
     state = "idle"
     last_error = ""
 
+    def shutdown(self, *, close_devices=True):
+        self.state = "closed"
+
     def snapshot(self):
         return {"state": self.state, "last_error": self.last_error}
 
@@ -19,6 +22,9 @@ class Teleop:
         pass
 
     def stop_follow(self, reason):
+        pass
+
+    def finish_external_control(self):
         pass
 
     def emergency_stop(self, reason):
@@ -58,7 +64,7 @@ class Camera:
 
 
 class SampleSource:
-    def clear_wrist(self):
+    def clear_streams(self):
         pass
 
     def clear_base(self):
@@ -82,8 +88,7 @@ class Lifecycle:
 class Runtime:
     teleop_engine: object
     recorder: object
-    wrist_camera: object
-    base_camera: object
+    camera_devices: dict
     sample_source: object
     cr3a_lifecycle: object
     store: object
@@ -100,6 +105,8 @@ class Store:
     data = {
         "master": {"type": "gello"},
         "dataset": {
+            "base_camera_serial": "base",
+            "wrist_camera_serial": "wrist",
             "base_roi_norm": [0.1, 0.1, 0.9, 0.9],
             "task": "task",
             "root": "/tmp/data",
@@ -113,8 +120,7 @@ class Factory:
         self.runtime = Runtime(
             teleop_engine=Teleop(),
             recorder=Recorder(),
-            wrist_camera=Camera(),
-            base_camera=Camera(),
+            camera_devices={"base": Camera(), "wrist": Camera()},
             sample_source=SampleSource(),
             cr3a_lifecycle=Lifecycle(),
             store=Store(),
@@ -141,8 +147,28 @@ def test_operator_application_build_does_not_connect_cameras(tmp_path) -> None:
 
     app = build_operator_application(tmp_path, factory=factory)
 
-    assert not factory.runtime.wrist_camera.connected
-    assert not factory.runtime.base_camera.connected
+    assert not factory.runtime.camera_devices["wrist"].connected
+    assert not factory.runtime.camera_devices["base"].connected
+    app.close()
+
+
+def test_operator_dagger_root_uses_explicit_configuration(tmp_path, monkeypatch) -> None:
+    external_openpi = tmp_path / "openpi"
+    monkeypatch.setenv("GELLO_CR_OPENPI_ROOT", str(external_openpi))
+
+    app = build_operator_application(tmp_path / "gello_CR", factory=Factory())
+
+    assert app.dagger.openpi_root == external_openpi.resolve()
+    app.close()
+
+
+def test_operator_dagger_root_defaults_to_project(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("GELLO_CR_OPENPI_ROOT", raising=False)
+    repo_root = tmp_path / "gello_CR"
+
+    app = build_operator_application(repo_root, factory=Factory())
+
+    assert app.dagger.openpi_root == repo_root.resolve()
     app.close()
 
 

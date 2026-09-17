@@ -47,12 +47,15 @@ def test_start_cameras_is_safe_self_transition(state) -> None:
 
 
 @pytest.mark.parametrize("state", tuple(WorkflowState))
-def test_stop_cameras_is_available_in_every_workflow_state(
+def test_stop_cameras_preserves_live_dagger_observations(
     state,
 ) -> None:
     machine = WorkflowStateMachine(state=state)
-
-    assert machine.apply(Command.STOP_CAMERAS) is state
+    if state is WorkflowState.DAGGER_RUNNING:
+        with pytest.raises(InvalidTransition):
+            machine.apply(Command.STOP_CAMERAS)
+    else:
+        assert machine.apply(Command.STOP_CAMERAS) is state
 
 
 def test_prepare_devices_rejected_offline() -> None:

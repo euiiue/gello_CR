@@ -1,6 +1,8 @@
 """Full recorder -> Unix IPC -> real LeRobot/MP4 -> validation, synthetic inputs."""
 import sys
 import time
+from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -50,3 +52,43 @@ def test_real_worker_success_failure_discard_and_finalize(tmp_path, monkeypatch,
     assert result['episodes'] == 2
     assert result['frames'] == sum(counts)
     assert not recorder.snapshot()['session_active']
+
+
+def test_native_resolution_and_switch_root_without_restarting(tmp_path):
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image[:, ::4] = 255
+
+    def sample():
+        ts = time.monotonic()
+        return {'timestamp': ts, 'observation_state': [0.] * 18, 'action': [0.] * 12,
+                'image_base_rgb': image, 'image_wrist_rgb': image, 'image_roi_rgb': image,
+                'quality': {'wrist_timestamp': ts, 'base_timestamp': ts,
+                            'wrist_age_s': 0., 'base_age_s': 0., 'camera_skew_s': 0.}}
+
+    recorder = LeRobotEpisodeRecorder(sample, lambda *args: None, sys.executable,
+                                     'local/native', image_size=(480, 640))
+    roots = []
+    try:
+        for parent in (tmp_path / 'first folder', tmp_path / 'second folder'):
+            recorder.start_episode('native recording', str(parent))
+            deadline = time.monotonic() + 15
+            while recorder.snapshot()['buffered_frames'] < 3:
+                assert not recorder.snapshot()['error']
+                assert time.monotonic() < deadline
+                time.sleep(.01)
+            recorder.stop_episode()
+            recorder.save_episode('success')
+            root = Path(recorder.snapshot()['root'])
+            assert root.parent == parent
+            roots.append(root)
+        recorder.close()
+        for root in roots:
+            assert validate_dataset(root)['valid']
+            info = json.loads((root / 'meta/info.json').read_text())
+            assert info['features']['observation.images.base_0_rgb']['shape'] == [480, 640, 3]
+    finally:
+        if recorder.snapshot()['episode_active']:
+            recorder.stop_episode()
+        if recorder.snapshot()['buffered_frames']:
+            recorder.discard_episode()
+        recorder.close()

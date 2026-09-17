@@ -76,7 +76,7 @@ def prepare_recording_frame(
     """Build the existing worker `add_frame` request and raw RGB payload.
 
     Raw image order is frozen as:
-    base full RGB -> wrist full RGB -> base ROI RGB.
+    configured slot 1 -> slot 2 -> slot 3 (full camera or ROI per slot).
     """
 
     validate_recording_sample(sample)

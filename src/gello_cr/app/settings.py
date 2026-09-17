@@ -109,16 +109,12 @@ SETTINGS_GROUPS = {
         SettingField("dataset.task", "默认任务描述", "text"),
         SettingField("dataset.repo_prefix", "数据集标识前缀（owner/name）", "text"),
         SettingField("dataset.fps", "采集帧率（Hz）", "int", 1, 60),
+        SettingField("dataset.image_size", "保存尺寸（高 / 宽，偶数；原画 480 / 640）", "int", 2, 2160, 2),
         SettingField("dataset.camera_max_age_s", "相机帧最大时龄（s）", minimum=0.000001),
-        SettingField("dataset.camera_max_skew_s", "双相机最大时间差（s）", minimum=0.000001),
+        SettingField("dataset.camera_max_skew_s", "相机画面最大时间差（s）", minimum=0.000001),
         SettingField("dataset.action_max_age_s", "动作最大时龄（s）", minimum=0.000001),
         SettingField(
             "dataset.max_tracking_error_deg", "跟踪误差质量标记阈值（°）", minimum=0.000001
-        ),
-        SettingField("dataset.base_camera_serial", "Base 相机序列号", "text"),
-        SettingField("dataset.wrist_camera_serial", "Wrist 相机序列号", "text"),
-        SettingField(
-            "dataset.base_roi_norm", "Base ROI（x1 / y1 / x2 / y2）", minimum=0, maximum=1, count=4
         ),
         SettingField("dataset.worker_python", "数采 Python 解释器", "text"),
     ),

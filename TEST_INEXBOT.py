@@ -65,7 +65,7 @@ from gello_cr.core.state_machine import Command, WorkflowState
 # INEXBOT class
 # 如果要引用子文件夹的一个内容还不行，就直接系统路径中包含这个文件夹
 # from TEST_INEXBOT.nrc_interface import nrc_interface as aa
-sys.path.append(str(BASE_DIR / 'TESTRobot_INEXBOT'))
+sys.path.append(str(BASE_DIR / 'vendor' / 'nrc'))
 import nrc_interface as aa
 import sys
 from PyQt5.QtWidgets import QApplication
@@ -87,7 +87,7 @@ ROBOT1_TCPPOS = [0,0,0,0,0,0,0]
 # GELLO hand class
 # 引用子文件夹的py文件，文件夹.文件名 即可（文件夹内部放一个空的__init__.py）
 # import driver
-# from TESTMaster_GELLO import driver
+# from vendor.gello import driver
 #from driver import DynamixelDriver
 # RoArm-M2-Pro 使用原厂 ESP32 JSON/UART，不再使用 DynamixelDriver。
 
@@ -110,7 +110,7 @@ GELLO_1_Direction = [1.0,1.0,-1.0,1.0,1.0,1.0,1.0]
 
 # LINKERBOT Hand class
 # 如果要引用子文件夹的一个内容还不行，就直接系统路径中包含这个文件夹
-sys.path.append(str(BASE_DIR / 'TESTHand_LINKERBOT'))
+sys.path.append(str(BASE_DIR / 'vendor'))
 from linker_hand_python_sdk.LinkerHand.linker_hand_api import LinkerHandApi
 from linker_hand_python_sdk.LinkerHand.utils.color_msg import ColorMsg
 from linker_hand_python_sdk.LinkerHand.utils.load_write_yaml import LoadWriteYaml
@@ -129,7 +129,6 @@ Hand_1_Error = [0,0,0,0,0,0,0]
 
 
 # WEIXUE Master Hand Class
-sys.path.append(str(BASE_DIR / 'TESTRobot_WEIXUE'))
 # MasterHand_WEIXUE.py 在被 import 时会立即打开 /dev/ttyUSB0 并进入死循环，
 # 会抢占 RoArm 串口。旧 WEIXUE 页面保留，但不再自动导入该模块。
 MasterHand_WEIXUE = None
@@ -142,7 +141,7 @@ WEIXUE_1_CurrentTCPPos = [0,0,0,0,0,0]
 
 
 # Force Sensor Class
-sys.path.append(str(BASE_DIR / 'TESTSensor_ROBOTIQ'))
+sys.path.append(str(BASE_DIR / 'vendor' / 'robotiq_sensor'))
 import Sensor_Robotiq
 
 from teleop_runtime import (
@@ -1358,7 +1357,9 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         gello_cfg = cfg["gello"]
         self.gello_controller = GelloController(
             port=gello_cfg["port"],
-            software_root=gello_cfg["software_root"],
+            software_root=str(
+                self.teleop_store.resolve_path(gello_cfg["software_root"])
+            ),
             joint_ids=gello_cfg["joint_ids"],
             joint_offsets=gello_cfg["joint_offsets"],
             joint_signs=gello_cfg["joint_signs"],
@@ -1376,7 +1377,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
         )
         self.o6_controller = O6Controller(
             cfg["o6"]["port"],
-            BASE_DIR / "TESTHand_LINKERBOT" / "linker_hand_python_sdk" / "LinkerHand",
+            BASE_DIR / "vendor" / "linker_hand_python_sdk" / "LinkerHand",
             cfg["o6"]["hand_id"],
             cfg["o6"]["baudrate"],
         )
@@ -4178,7 +4179,7 @@ class MyMainForm(QMainWindow, Ui_MainWindow):
                         servoj_vmax=float(cfg["servoj_vmax"]),
                         servoj_amax=float(cfg["servoj_amax"]),
                         servoj_jmax=float(cfg["servoj_jmax"]),
-                        sdk_root=str(BASE_DIR / "TESTRobot_INEXBOT"),
+                        sdk_root=str(BASE_DIR / "vendor" / "nrc"),
                     ),
                     event_callback=forward_cr3a_event,
                 )

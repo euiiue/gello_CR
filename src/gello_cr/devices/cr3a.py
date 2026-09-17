@@ -146,7 +146,7 @@ class Cr3aDevice:
         root = Path(
             os.environ.get("NRC_SDK_ROOT")
             or self.config.sdk_root
-            or Path(__file__).resolve().parents[3] / "TESTRobot_INEXBOT"
+            or Path(__file__).resolve().parents[3] / "vendor" / "nrc"
         ).expanduser().resolve()
         if not (root / "nrc_interface.py").is_file():
             raise FileNotFoundError(

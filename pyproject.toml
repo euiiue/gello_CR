@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.26", "opencv-python>=4.8", "pyserial>=3.5"]
 
 [project.optional-dependencies]
 ui = ["PySide6-Essentials>=6.7"]
+dagger = ["websockets>=14", "PyYAML>=6", "msgpack>=1.0.5"]
 data-validation = ["pyarrow>=15", "av>=12", "pandas>=2"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 

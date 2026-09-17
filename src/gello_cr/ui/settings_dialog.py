@@ -1,17 +1,19 @@
-"""Offline parameter editor. No device access or motion commands."""
+"""Offline parameter editor with explicit camera discovery; no motion commands."""
 
 from __future__ import annotations
 
 import copy
+import threading
 import traceback
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,6 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from gello_cr.app.settings import SETTINGS_GROUPS, OperatorSettings
+from gello_cr.devices.camera_streams import resolve_camera_streams
+from gello_cr.devices.realsense import discover_realsense_cameras
 
 PAGE_NOTES = {
     "机械臂": "ServoJ v/a/j 按 SDK 原值保存。关节保护对 J1–J6 生效；"
@@ -36,12 +40,14 @@ PAGE_NOTES = {
     "O6 动作": "编辑动作库并选择 J7 张开 / 闭合动作。仅保存参数，不发送手部动作。"
     "六列顺序：拇指弯曲、拇指侧摆、食指、中指、无名指、小指。",
     "数采与相机": "质量阈值用于标记 needs_review；机械臂停止阈值在“机械臂”页。"
-    "输出保持三路 224×224 RGB；ROI 坐标归一化至 0–1。",
+    "建议保存高 480 / 宽 640，训练时再缩放；画面来源和 ROI 在“相机画面”页设置。",
     "控制器连接": "连接参数在下次启动后使用；启动后仍需手动连接与使能。",
 }
 
 
 class OperatorSettingsDialog(QDialog):
+    cameras_discovered = Signal(object, str)
+
     def __init__(self, settings: OperatorSettings, parent=None):
         super().__init__(parent)
         self.settings = settings
@@ -115,6 +121,7 @@ class OperatorSettingsDialog(QDialog):
             scroll.setFrameShape(QScrollArea.NoFrame)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, name)
+        self._build_camera_page()
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet("color: #b3261e")
@@ -126,6 +133,93 @@ class OperatorSettingsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         outer.addWidget(self.buttons)
         self._initial_candidate = self._candidate()
+
+    def _build_camera_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        description = QLabel(
+            "三个窗口分别选择相机和画面类型，预览与 LeRobot 使用同一来源。"
+            "同一相机可用于多个窗口；ROI 为 0–1 的归一化坐标。保存后重新启动软件生效。"
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.camera_scan_button = QPushButton("刷新已连接相机")
+        self.camera_scan_button.clicked.connect(self._scan_cameras)
+        layout.addWidget(self.camera_scan_button)
+        self.camera_scan_status = QLabel("可刷新选择设备，也可以直接填写相机序列号。")
+        self.camera_scan_status.setWordWrap(True)
+        layout.addWidget(self.camera_scan_status)
+        self.camera_editors = []
+        for index, stream in enumerate(resolve_camera_streams(self.settings.data["dataset"])):
+            group = QGroupBox(f"录制窗口 {index + 1}")
+            form = QFormLayout(group)
+            name = QLineEdit(stream.name)
+            serial = QComboBox()
+            serial.setEditable(True)
+            serial.addItem(stream.serial)
+            mode = QComboBox()
+            mode.addItem("相机完整画面", "camera")
+            mode.addItem("该相机的 ROI 裁剪", "roi")
+            mode.setCurrentIndex(mode.findData(stream.mode))
+            roi_row = QWidget()
+            roi_layout = QHBoxLayout(roi_row)
+            roi_layout.setContentsMargins(0, 0, 0, 0)
+            roi_edits = []
+            for label, value in zip(("x1", "y1", "x2", "y2"), stream.roi_norm, strict=True):
+                roi_layout.addWidget(QLabel(label))
+                edit = QLineEdit(str(value))
+                edit.setAccessibleName(f"窗口 {index + 1} ROI {label}")
+                roi_layout.addWidget(edit)
+                roi_edits.append(edit)
+            form.addRow("窗口名称", name)
+            form.addRow("相机序列号", serial)
+            form.addRow("画面类型", mode)
+            form.addRow("裁剪范围", roi_row)
+            roi_row.setEnabled(stream.mode == "roi")
+            mode.currentIndexChanged.connect(
+                lambda _index, row=roi_row, combo=mode: row.setEnabled(combo.currentData() == "roi")
+            )
+            self.camera_editors.append((name, serial, mode, roi_edits))
+            layout.addWidget(group)
+        layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, "相机画面")
+        self.cameras_discovered.connect(self._show_cameras)
+
+    def _scan_cameras(self):
+        self.camera_scan_button.setEnabled(False)
+        self.camera_scan_status.setText("正在读取相机列表…")
+
+        def scan():
+            try:
+                devices = discover_realsense_cameras()
+            except Exception as exc:
+                traceback.print_exception(exc)
+                self.cameras_discovered.emit([], f"{type(exc).__name__}: {exc}")
+            else:
+                self.cameras_discovered.emit(devices, "")
+
+        threading.Thread(target=scan, name="CameraDiscovery", daemon=True).start()
+
+    def _show_cameras(self, devices, error):
+        self.camera_scan_button.setEnabled(True)
+        if error:
+            self.camera_scan_status.setText(f"读取相机失败：{error}")
+            return
+        for _name, combo, _mode, _roi in self.camera_editors:
+            selected = combo.currentText().split(" · ", 1)[0].strip()
+            combo.clear()
+            for device in devices:
+                combo.addItem(f"{device['serial']} · {device['name']}", device["serial"])
+            index = combo.findData(selected)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            else:
+                combo.setEditText(selected)
+        self.camera_scan_status.setText(f"检测到 {len(devices)} 台相机；刷新不会更改已选序列号。")
 
     def _build_actions(self, layout):
         self.actions_table = QTableWidget(0, 7)
@@ -230,6 +324,22 @@ class OperatorSettingsDialog(QDialog):
                     [edit.text() for edit in self.editors[field.path]]
                 )
         candidate["dataset"]["recording_mode"] = self.recording_mode.currentData()
+        streams = [
+            {"name": name.text().strip(),
+             "serial": serial.currentText().split(" · ", 1)[0].strip(),
+             "mode": mode.currentData(),
+             "roi_norm": [float(edit.text()) for edit in roi_edits]}
+            for name, serial, mode, roi_edits in self.camera_editors
+        ]
+        # Preserve an untouched legacy config; persist explicit slots on the first edit.
+        original = resolve_camera_streams(self.settings.data["dataset"])
+        parsed = resolve_camera_streams({"camera_streams": streams})
+        if self.settings.data["dataset"].get("camera_streams") is not None or any(
+            (a.name, a.serial, a.mode, tuple(a.roi_norm)) !=
+            (b.name, b.serial, b.mode, tuple(b.roi_norm))
+            for a, b in zip(original, parsed, strict=True)
+        ):
+            candidate["dataset"]["camera_streams"] = streams
         actions = {}
         for row in range(self.actions_table.rowCount()):
             name = self.actions_table.item(row, 0).text().strip()

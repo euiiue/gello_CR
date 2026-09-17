@@ -131,9 +131,10 @@ def test_application_cleanup_continues_and_retries_only_failed_resources():
         if calls.count('runtime') == 1:
             raise OSError('disconnect failed')
     backend = SimpleNamespace(
-        command_port=SimpleNamespace(pending_commands=(), close=lambda **kw: calls.append('commands')),
+        command_port=SimpleNamespace(pending_commands=(), stop_accepting=lambda: None,
+                                     close=lambda **kw: calls.append('commands')),
         presenter=SimpleNamespace(close=lambda: calls.append('presenter')))
-    runtime = SimpleNamespace(close=fail_once, recorder=SimpleNamespace(
+    runtime = SimpleNamespace(close=fail_once, teleop_engine=SimpleNamespace(shutdown=lambda **kw: None), recorder=SimpleNamespace(
         snapshot=lambda: {}, close=lambda: calls.append('recorder')))
     app = OperatorApplication(runtime, backend, SimpleNamespace(close=lambda: calls.append('cameras')),
                               None, None)
@@ -152,7 +153,7 @@ def test_runtime_cleanup_attempts_all_devices_after_stop_failure():
     def device(name):
         return SimpleNamespace(close=lambda **kw: calls.append(name))
     runtime = ConcreteRuntime(None, None, device('roarm'), device('inverse3'), device('gello'),
-        None, device('o6'), SimpleNamespace(shutdown=broken_stop), None, None, None, None,
+        None, device('o6'), SimpleNamespace(shutdown=broken_stop), None, None, {},
         SimpleNamespace(shutdown_power=lambda: calls.append('power'),
                         disconnect=lambda: calls.append('disconnect')))
     with pytest.raises(ExceptionGroup):

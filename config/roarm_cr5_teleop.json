@@ -17,12 +17,12 @@
     "movej_max_segment_deg": 2.0,
     "movej_duplicate_deadband_deg": 0.15,
     "safety_max_command_step_rad": 2.6179938779914944,
-    "safety_max_command_speed_rad_s": 20.0,
+    "safety_max_command_speed_rad_s": 40.0,
     "safety_speed_violation_cycles": 3,
     "safety_max_tracking_error_rad": 2.356194490192345,
-    "servoj_vmax": 80.0,
-    "servoj_amax": 195.0,
-    "servoj_jmax": 120.0
+    "servoj_vmax": 100.0,
+    "servoj_amax": 200.0,
+    "servoj_jmax": 180.0
   },
   "roarm": {
     "port": "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_36df624f63e4ee118642737d4c11a646-if00-port0",
@@ -43,10 +43,10 @@
   "gello": {
     "port": "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB6W7LM-if00-port0",
     "baudrate": 57600,
-    "software_root": "/home/ace/cyf/TEST_PY12_MOVEJ_LOW_LATENCY_TEST/TESTMaster_GELLO/gello_software-main",
+    "software_root": "../vendor/gello",
     "control_mode": "joint",
     "joint_scale": 1.1,
-    "kinematics_urdf": "/home/ace/cyf/TEST_PY12_MOVEJ_LOW_LATENCY_TEST/TESTMaster_GELLO/gello_software-main/gello/factr/urdf/yam_active_gello/robot.urdf",
+    "kinematics_urdf": "../vendor/gello/gello/factr/urdf/yam_active_gello/robot.urdf",
     "xyz_axis_map": [
       [
         1.0,
@@ -143,6 +143,8 @@
     "command_deadband": 2,
     "feedback_timeout_s": 1.0,
     "action_timeout_s": 15.0,
+    "open_action": "张开手",
+    "closed_action": "抓取",
     "actions": {
       "张开手": [
         157,
@@ -243,13 +245,14 @@
     "max_joint_speed_deg_s": 120.0
   },
   "dataset": {
-    "root": "/home/ace/datasets/motor recognization",
+    "recording_mode": "joint",
+    "root": "~/datasets/final fantasy",
     "repo_prefix": "ace/cr5_o6",
     "task": "Pick up the motor and place it on the right side with the protruding side facing left.",
     "fps": 20,
     "image_size": [
-      224,
-      224
+      480,
+      640
     ],
     "camera_max_age_s": 0.5,
     "camera_max_skew_s": 0.1,
@@ -263,7 +266,42 @@
       0.55,
       0.79
     ],
-    "worker_python": "/home/ace/miniconda3/envs/lerobot/bin/python"
+    "camera_streams": [
+      {
+        "name": "Base RGB",
+        "serial": "254622075848",
+        "mode": "camera",
+        "roi_norm": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "name": "Wrist RGB",
+        "serial": "317222074617",
+        "mode": "camera",
+        "roi_norm": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "name": "Camera 3 RGB",
+        "serial": "262422074985",
+        "mode": "camera",
+        "roi_norm": [
+          0.37,
+          0.56,
+          0.55,
+          0.79
+        ]
+      }
+    ],
+    "worker_python": "~/miniconda3/envs/lerobot/bin/python"
   },
   "shortcuts": {
     "prepare": "F5",

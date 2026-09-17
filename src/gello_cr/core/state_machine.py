@@ -15,6 +15,8 @@ class WorkflowState(Enum):
     RECORDING = auto()
     FAULT = auto()
     ESTOP = auto()
+    RETURNING_HOME = auto()
+    DAGGER_RUNNING = auto()
 
 
 class Command(Enum):
@@ -37,6 +39,10 @@ class Command(Enum):
     EMERGENCY_STOP = auto()
     RESET_ESTOP = auto()
     HOME_COMPLETED = auto()
+    RETURN_HOME = auto()
+    START_DAGGER = auto()
+    STOP_DAGGER = auto()
+    TOGGLE_INTERVENTION = auto()
 
 
 class InvalidTransition(RuntimeError):
@@ -44,6 +50,11 @@ class InvalidTransition(RuntimeError):
 
 
 _NORMAL_TRANSITIONS: dict[tuple[WorkflowState, Command], WorkflowState] = {
+    (WorkflowState.ROBOT_ENABLED, Command.START_DAGGER): WorkflowState.DAGGER_RUNNING,
+    (WorkflowState.DAGGER_RUNNING, Command.STOP_DAGGER): WorkflowState.ROBOT_ENABLED,
+    (WorkflowState.DAGGER_RUNNING, Command.TOGGLE_INTERVENTION): WorkflowState.DAGGER_RUNNING,
+    (WorkflowState.FAULT, Command.STOP_DAGGER): WorkflowState.FAULT,
+    (WorkflowState.ESTOP, Command.STOP_DAGGER): WorkflowState.ESTOP,
     (WorkflowState.OFFLINE, Command.CONNECT): WorkflowState.CONNECTED,
 
     # Auxiliary preparation never changes the robot workflow state.
@@ -88,6 +99,11 @@ _NORMAL_TRANSITIONS: dict[tuple[WorkflowState, Command], WorkflowState] = {
     ): WorkflowState.RECORDING,
     (WorkflowState.FAULT, Command.STOP_CAMERAS): WorkflowState.FAULT,
     (WorkflowState.ESTOP, Command.STOP_CAMERAS): WorkflowState.ESTOP,
+    (WorkflowState.RETURNING_HOME, Command.STOP_CAMERAS): WorkflowState.RETURNING_HOME,
+    (
+        WorkflowState.RETURNING_HOME,
+        Command.STOP_CAMERAS,
+    ): WorkflowState.RETURNING_HOME,
 
     (WorkflowState.CONNECTED, Command.DISCONNECT): WorkflowState.OFFLINE,
     (WorkflowState.CONNECTED, Command.POWER_ON): WorkflowState.ROBOT_ENABLED,
@@ -130,10 +146,12 @@ class WorkflowStateMachine:
     recovery_state: WorkflowState = WorkflowState.OFFLINE
 
     def can(self, command: Command) -> bool:
+        if command is Command.RETURN_HOME:
+            return self.state not in (WorkflowState.OFFLINE, WorkflowState.RETURNING_HOME)
         if command is Command.HOME_COMPLETED:
             return self.state is not WorkflowState.OFFLINE
         if self.state is WorkflowState.ROBOT_ENABLED and command in (
-            Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
+            Command.SAVE_SUCCESS, Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
         ):
             return True
         if command is Command.EMERGENCY_STOP:
@@ -167,12 +185,15 @@ class WorkflowStateMachine:
                 f"{command.name} is not allowed from {self.state.name}"
             )
 
+        if command is Command.RETURN_HOME:
+            self.state = WorkflowState.RETURNING_HOME
+            return self.state
         if command is Command.HOME_COMPLETED:
             self.state = WorkflowState.ROBOT_ENABLED
             self.recovery_state = WorkflowState.ROBOT_ENABLED
             return self.state
         if self.state is WorkflowState.ROBOT_ENABLED and command in (
-            Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
+            Command.SAVE_SUCCESS, Command.SAVE_FAILURE, Command.DISCARD_EPISODE,
         ):
             return self.state
 
@@ -217,6 +238,7 @@ class WorkflowStateMachine:
         if previous in (
             WorkflowState.RECORDING,
             WorkflowState.TELEOP_RUNNING,
+            WorkflowState.DAGGER_RUNNING,
         ):
             return WorkflowState.ROBOT_ENABLED
         if previous is WorkflowState.ROBOT_ENABLED:

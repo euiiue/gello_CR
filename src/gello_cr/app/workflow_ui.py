@@ -60,6 +60,8 @@ def workflow_ui_policy(
             WorkflowState.TELEOP_RUNNING,
             WorkflowState.RECORDING,
             WorkflowState.FAULT,
+            WorkflowState.RETURNING_HOME,
+            WorkflowState.DAGGER_RUNNING,
         ),
         start_episode=(
             state is WorkflowState.TELEOP_RUNNING
@@ -71,7 +73,11 @@ def workflow_ui_policy(
         ),
         stop_episode=state is WorkflowState.RECORDING and active,
         save_success=(
-            state is WorkflowState.RECORDING
+            state
+            in (
+                WorkflowState.RECORDING,
+                WorkflowState.ROBOT_ENABLED,
+            )
             and pending
             and not active
         ),

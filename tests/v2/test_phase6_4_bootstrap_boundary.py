@@ -36,6 +36,4 @@ def test_recording_sample_source_replaces_legacy_qt_sample_provider_contract() -
         ROOT / 'src/gello_cr/bootstrap/sample_source.py'
     ).read_text(encoding='utf-8')
     assert "sample = self._teleop_engine.dataset_sample()" in source
-    assert "sample['image_base_rgb']" in source
-    assert "sample['image_wrist_rgb']" in source
-    assert "sample['image_roi_rgb']" in source
+    assert "sample.update(zip(SAMPLE_IMAGE_KEYS, images, strict=True))" in source

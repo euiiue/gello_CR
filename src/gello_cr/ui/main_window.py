@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import threading
 import traceback
+from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFormLayout,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -20,6 +23,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +39,8 @@ from .readiness import OperatorReadiness
 
 
 class OperatorMainWindow(QMainWindow):
+    shutdown_finished = Signal(object)
+
     def __init__(
         self,
         presenter: OperatorUiPresenter,
@@ -46,11 +53,14 @@ class OperatorMainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self._close_callback = close_callback
+        self._closing = False
+        self._shutdown_complete = False
+        self.shutdown_finished.connect(self._finish_shutdown)
         self._settings_factory = settings_factory
         self._settings_restart_required = False
         self._presenter = presenter
         self._command_port = command_port
-        self._last_preview_timestamps = (-1.0, -1.0)
+        self._last_preview_timestamps = (-1.0, -1.0, -1.0)
 
         self.setWindowTitle("GELLO · CR3A · O6 Operator")
         self.setMinimumSize(1180, 820)
@@ -66,13 +76,28 @@ class OperatorMainWindow(QMainWindow):
         layout.addWidget(self._build_status_strip())
         layout.addWidget(self._build_primary_controls())
         layout.addWidget(self._build_preview_group(), 1)
-        layout.addWidget(self._build_episode_group())
+        task_row = QHBoxLayout()
+        task_row.addWidget(QLabel("Task"))
+        self.task_edit = QLineEdit()
+        task_row.addWidget(self.task_edit)
+        layout.addLayout(task_row)
+        self.collection_tabs = QTabWidget()
+        self.collection_tabs.addTab(self._build_episode_group(), "LeRobot Episode")
+        self.collection_tabs.addTab(self._build_dagger_group(), "DAgger 专家纠正")
+        layout.addWidget(self.collection_tabs)
+        self._dagger_was_running = False
         layout.addWidget(self._build_log_group())
 
         self._apply_operator_style()
         self._estop_shortcut = QShortcut(QKeySequence("F12"), self)
         self._estop_shortcut.activated.connect(
             lambda: self._submit(Command.EMERGENCY_STOP)
+        )
+        self._dagger_shortcut = QShortcut(QKeySequence("Space"), self)
+        self._dagger_shortcut.setAutoRepeat(False)
+        self._dagger_shortcut.setEnabled(False)
+        self._dagger_shortcut.activated.connect(
+            lambda: self._submit(Command.TOGGLE_INTERVENTION)
         )
 
         self._timer = QTimer(self)
@@ -172,10 +197,12 @@ class OperatorMainWindow(QMainWindow):
         self.disconnect_button = QPushButton("断开 CR3A")
         self.power_off_button = QPushButton("CR3A 下使能")
         self.stop_teleop_button = QPushButton("停止主从跟随")
-        self.start_cameras_button = QPushButton("启动双相机")
-        self.stop_cameras_button = QPushButton("停止双相机")
+        self.start_cameras_button = QPushButton("启动相机")
+        self.stop_cameras_button = QPushButton("停止相机")
         self.reset_fault_button = QPushButton("复位 FAULT")
         self.reset_estop_button = QPushButton("复位 ESTOP")
+        self.home_button = QPushButton("机械臂回 HOME")
+        self.home_button.setToolTip("停止跟随／回放，回位过程仍会录制，回位完成后结束 Episode，回已保存的初始位置")
 
         command_buttons = (
             (self.connect_button, Command.CONNECT),
@@ -189,6 +216,7 @@ class OperatorMainWindow(QMainWindow):
             (self.stop_cameras_button, Command.STOP_CAMERAS),
             (self.reset_fault_button, Command.RESET_FAULT),
             (self.reset_estop_button, Command.RESET_ESTOP),
+            (self.home_button, Command.RETURN_HOME),
         )
         for button, command in command_buttons:
             button.clicked.connect(
@@ -208,6 +236,7 @@ class OperatorMainWindow(QMainWindow):
         grid.addWidget(self.disconnect_button, 2, 0)
         grid.addWidget(self.reset_fault_button, 2, 1)
         grid.addWidget(self.reset_estop_button, 2, 2)
+        grid.addWidget(self.home_button, 2, 3)
         return group
 
     def _make_preview_label(
@@ -245,6 +274,8 @@ class OperatorMainWindow(QMainWindow):
             "Base ROI"
         )
 
+        self.preview_titles = [widget.findChild(QLabel, "previewTitle")
+                               for widget in (base_widget, wrist_widget, roi_widget)]
         row.addWidget(base_widget, 1)
         row.addWidget(wrist_widget, 1)
         row.addWidget(roi_widget, 1)
@@ -255,10 +286,16 @@ class OperatorMainWindow(QMainWindow):
         outer = QVBoxLayout(group)
 
         form = QFormLayout()
-        self.task_edit = QLineEdit()
         self.root_edit = QLineEdit()
-        form.addRow("Task", self.task_edit)
-        form.addRow("Dataset root", self.root_edit)
+        self.root_browse_button = QPushButton("选择文件夹…")
+        self.root_browse_button.clicked.connect(self._choose_dataset_root)
+        root_row = QWidget()
+        root_layout = QHBoxLayout(root_row)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.addWidget(self.root_edit)
+        root_layout.addWidget(self.root_browse_button)
+        self.root_edit.setToolTip("保存或丢弃当前 Episode 后可换目录；下一次开始将在新目录创建数据集")
+        form.addRow("数据集父目录", root_row)
         outer.addLayout(form)
 
         row = QHBoxLayout()
@@ -278,6 +315,7 @@ class OperatorMainWindow(QMainWindow):
         outer.addLayout(row)
 
         self.episode_status = QLabel("未启动数据集")
+        self.episode_status.setWordWrap(True)
         outer.addWidget(self.episode_status)
 
         self.episode_start_button.clicked.connect(self._start_episode)
@@ -294,6 +332,52 @@ class OperatorMainWindow(QMainWindow):
             lambda: self._submit(Command.DISCARD_EPISODE)
         )
         return group
+
+    def _build_dagger_group(self) -> QGroupBox:
+        group = QGroupBox("DAgger · 专家纠正采集")
+        layout = QVBoxLayout(group)
+        row = QHBoxLayout()
+        self.dagger_host = QLineEdit("127.0.0.1")
+        self.dagger_host.setMaximumWidth(180)
+        self.dagger_port = QSpinBox()
+        self.dagger_port.setRange(1, 65535)
+        self.dagger_port.setValue(8000)
+        self.dagger_round = QLineEdit("round1")
+        self.dagger_round.setMaximumWidth(100)
+        self.dagger_start_button = QPushButton("启动模型控制")
+        self.dagger_toggle_button = QPushButton("空格：接管并录制")
+        self.dagger_stop_button = QPushButton("停止 DAgger")
+        for widget in (QLabel("模型服务"), self.dagger_host, self.dagger_port,
+                       QLabel("轮次"), self.dagger_round, self.dagger_start_button,
+                       self.dagger_toggle_button, self.dagger_stop_button):
+            row.addWidget(widget)
+        layout.addLayout(row)
+        paths = QHBoxLayout()
+        paths.addWidget(QLabel("纠正数据目录"))
+        default_dagger_root = Path.home() / "datasets" / "cr3_o6_dagger_raw"
+        self.dagger_root = QLineEdit(str(default_dagger_root))
+        paths.addWidget(self.dagger_root)
+        layout.addLayout(paths)
+        self.dagger_status = QLabel("空格按一次接管并记录，再按一次结束纠正、恢复模型；Task 使用上方任务文本")
+        self.dagger_status.setWordWrap(True)
+        layout.addWidget(self.dagger_status)
+        self.dagger_start_button.clicked.connect(self._start_dagger)
+        self.dagger_toggle_button.clicked.connect(lambda: self._submit(Command.TOGGLE_INTERVENTION))
+        self.dagger_stop_button.clicked.connect(lambda: self._submit(Command.STOP_DAGGER))
+        return group
+
+    def _start_dagger(self) -> None:
+        self._submit(Command.START_DAGGER, {
+            "host": self.dagger_host.text().strip(), "port": self.dagger_port.value(),
+            "task": self.task_edit.text().strip(), "round_id": self.dagger_round.text().strip(),
+            "base_root": self.dagger_root.text().strip(),
+        })
+
+    def _choose_dataset_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择数据集父目录", self.root_edit.text())
+        if path:
+            self.root_edit.setText(path)
+            self.root_edit.editingFinished.emit()
 
     def _build_log_group(self) -> QGroupBox:
         group = QGroupBox("Application Events")
@@ -389,6 +473,9 @@ class OperatorMainWindow(QMainWindow):
             frame.readiness,
             frame.view_model,
         )
+        dataset_root = self._presenter.dataset_root
+        if dataset_root:
+            self.episode_status.setText(self.episode_status.text() + "\n实际保存：" + dataset_root)
         self.settings_button.setEnabled(
             self._settings_factory is not None
             and frame.view_model.workflow_state is WorkflowState.OFFLINE
@@ -401,9 +488,13 @@ class OperatorMainWindow(QMainWindow):
         self.settings_button.setToolTip("请在启动后、连接设备与相机前设置；保存后下次启动生效。")
         pending = getattr(self._command_port, "pending_commands", frozenset())
         if pending:
+            self._dagger_shortcut.setEnabled(False)
+            self.root_edit.setEnabled(False)
             for button in self.findChildren(QPushButton):
-                if button is not self.estop_button:
+                if button not in (self.estop_button, self.home_button):
                     button.setEnabled(False)
+            if Command.RETURN_HOME in pending:
+                self.home_button.setEnabled(False)
             self.statusBar().showMessage("BUSY · " + ", ".join(sorted(c.name for c in pending)))
         else:
             self.statusBar().clearMessage()
@@ -432,6 +523,39 @@ class OperatorMainWindow(QMainWindow):
         )
 
         policy = view.policy
+        dagger_running = view.workflow_state is WorkflowState.DAGGER_RUNNING
+        if dagger_running and not self._dagger_was_running:
+            self.collection_tabs.setCurrentIndex(1)
+        self._dagger_was_running = dagger_running
+        self.task_edit.setEnabled(not dagger_running)
+        self.dagger_start_button.setEnabled(
+            view.workflow_state is WorkflowState.ROBOT_ENABLED
+            and not (view.episode_active or view.episode_pending)
+        )
+        self.dagger_toggle_button.setEnabled(dagger_running)
+        self._dagger_shortcut.setEnabled(dagger_running and not self._closing)
+        self.dagger_stop_button.setEnabled(
+            dagger_running or bool(view.dagger_root) and view.workflow_state in (
+                WorkflowState.FAULT, WorkflowState.ESTOP,
+            )
+        )
+        for field in (self.dagger_host, self.dagger_port, self.dagger_round, self.dagger_root):
+            field.setEnabled(not dagger_running)
+        self.dagger_toggle_button.setText(
+            "空格：结束纠正、恢复模型" if view.dagger_phase == "CORRECTING" else "空格：接管并录制"
+        )
+        if view.dagger_root:
+            phase = {"AUTONOMOUS": "模型控制", "CORRECTING": "专家接管 · 正在记录",
+                     "WAIT_NEW_POLICY": "保持位置 · 等待新模型动作"}.get(view.dagger_phase, "已停止")
+            self.dagger_status.setText(
+                f"{phase if dagger_running else '已停止'} · {view.dagger_expert_frames} 专家帧\n{view.dagger_root}"
+            )
+        can_change_root = not (view.episode_active or view.episode_pending)
+        self.root_edit.setEnabled(can_change_root)
+        self.root_browse_button.setEnabled(can_change_root)
+        self.home_button.setEnabled(view.workflow_state not in (
+            WorkflowState.OFFLINE, WorkflowState.RETURNING_HOME,
+        ))
         self.connect_button.setEnabled(policy.connect_robot)
         self.disconnect_button.setEnabled(policy.disconnect_robot)
         self.power_on_button.setEnabled(policy.power_on)
@@ -481,6 +605,7 @@ class OperatorMainWindow(QMainWindow):
         elif state in (
             WorkflowState.TELEOP_RUNNING,
             WorkflowState.RECORDING,
+            WorkflowState.DAGGER_RUNNING,
         ):
             cr3a_text = "active"
         elif state is WorkflowState.FAULT:
@@ -498,13 +623,13 @@ class OperatorMainWindow(QMainWindow):
         )
 
         if readiness.camera_error:
-            camera_text = "ERROR · " + readiness.camera_error[:80]
+            camera_text = "ERROR · " + readiness.camera_error[:28]
             self.camera_status.setToolTip(readiness.camera_error)
         elif readiness.camera_frames_ready:
             camera_text = "fresh"
             self.camera_status.setToolTip("")
         elif readiness.cameras_running:
-            camera_text = "starting"
+            camera_text = "画面未就绪"
             self.camera_status.setToolTip("")
         else:
             camera_text = "stopped"
@@ -531,6 +656,7 @@ class OperatorMainWindow(QMainWindow):
         )
         self.stop_cameras_button.setEnabled(
             readiness.cameras_running
+            and state is not WorkflowState.DAGGER_RUNNING
             and not view.episode_active
             and not view.episode_pending
         )
@@ -547,6 +673,30 @@ class OperatorMainWindow(QMainWindow):
             self.episode_start_button.isEnabled()
             and readiness.camera_frames_ready
         )
+        self.dagger_start_button.setEnabled(
+            self.dagger_start_button.isEnabled() and readiness.devices_ready and readiness.camera_frames_ready
+        )
+        reasons = []
+        if not view.episode_active and not view.episode_pending:
+            if not view.policy.start_episode:
+                reasons.append(
+                    "请先启动主从跟随"
+                    if state is WorkflowState.ROBOT_ENABLED
+                    else f"当前状态 {view.workflow_label} 不允许开始录制"
+                )
+            if not readiness.camera_frames_ready:
+                reasons.append(
+                    readiness.camera_error
+                    or (
+                        "等待三路新鲜且同步的画面"
+                        if readiness.cameras_running
+                        else "请先启动相机"
+                    )
+                )
+        message = "暂不能开始：" + "；".join(reasons) if reasons else ""
+        self.episode_start_button.setToolTip(message)
+        if message:
+            self.episode_status.setText(self.episode_status.text() + "\n" + message)
 
     @staticmethod
     def _pixmap_from_rgb(image_rgb) -> QPixmap | None:
@@ -594,9 +744,13 @@ class OperatorMainWindow(QMainWindow):
         label.setPixmap(pixmap)
 
     def render_preview(self, preview: CameraPreview) -> None:
+        for index, title in enumerate(self.preview_titles):
+            title.setText(preview.stream_names[index])
+            title.setToolTip(preview.stream_descriptions[index] if preview.stream_descriptions else "")
         timestamps = (
             preview.base_timestamp,
             preview.wrist_timestamp,
+            preview.roi_timestamp,
         )
         if timestamps == self._last_preview_timestamps:
             return
@@ -605,17 +759,17 @@ class OperatorMainWindow(QMainWindow):
         self._set_preview_image(
             self.base_preview,
             preview.base_rgb,
-            "Base RGB · waiting",
+            f"{preview.stream_names[0]} · 等待相机",
         )
         self._set_preview_image(
             self.wrist_preview,
             preview.wrist_rgb,
-            "Wrist RGB · waiting",
+            f"{preview.stream_names[1]} · 等待相机",
         )
         self._set_preview_image(
             self.roi_preview,
             preview.roi_rgb,
-            "Base ROI · waiting",
+            f"{preview.stream_names[2]} · 等待相机",
         )
 
     def append_event(self, event: AppEvent) -> None:
@@ -631,28 +785,50 @@ class OperatorMainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._presenter.closed:
+        if self._shutdown_complete or self._presenter.closed:
             event.accept()
             return
+        event.ignore()
+        if self._closing:
+            return
         view = self._presenter.poll().view_model
+        save_pending = False
         if view.episode_active or view.episode_pending:
-            QMessageBox.warning(
-                self, "Episode 尚未处理",
-                "请先 STOP_EPISODE，再明确保存成功、保存失败或丢弃。当前窗口保持打开。",
-            )
-            event.ignore()
-            return
-        try:
-            if self._close_callback is not None:
-                self._close_callback()
-            else:
-                self._command_port.close(timeout=1.0)
-                self._presenter.close()
-        except Exception as exc:
-            traceback.print_exception(exc)
-            QMessageBox.critical(self, "退出未完成", f"{exc!r}\n请查看终端诊断并重试退出。")
-            self.event_log.appendPlainText(f"SHUTDOWN ERROR: {exc!r}")
-            event.ignore()
-            return
+            result = QMessageBox.question(self, "保存数据并退出", "停止运动，将未完成 Episode 保存为失败后退出？",
+                                          QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if result != QMessageBox.Yes:
+                return
+            save_pending = True
+        self._closing = True
+        self._dagger_shortcut.setEnabled(False)
         self._timer.stop()
-        event.accept()
+        self.statusBar().showMessage("正在停止运动、保存数据并释放设备，请稍候…")
+        for button in self.findChildren(QPushButton):
+            button.setEnabled(False)
+
+        def shutdown():
+            error = None
+            try:
+                if self._close_callback is not None:
+                    if save_pending:
+                        self._close_callback(save_pending=True)
+                    else:
+                        self._close_callback()
+                else:
+                    self._command_port.close(timeout=1.0)
+                    self._presenter.close()
+            except Exception as exc:
+                traceback.print_exception(exc)
+                error = exc
+            self.shutdown_finished.emit(error)
+
+        threading.Thread(target=shutdown, name="Operator-Shutdown", daemon=True).start()
+
+    def _finish_shutdown(self, error) -> None:
+        self._closing = False
+        if error is not None:
+            self.event_log.appendPlainText(f"SHUTDOWN ERROR: {error!r}")
+            QMessageBox.critical(self, "退出未完成", f"{error!r}\n数据未丢弃；可再次关闭重试收尾。")
+            return
+        self._shutdown_complete = True
+        self.close()
