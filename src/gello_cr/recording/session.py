@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,7 @@ class RecordingSession:
         self._started_at = self._stopped_at = 0.0
         self._first_sample_at = self._last_sample_at = 0.0
         self._late_frames = 0
+        self._skipped_samples = 0
         self._max_frame_gap_s = 0.0
         self._quality_max = {}
         self._last_camera_timestamps = {}
@@ -172,6 +174,7 @@ class RecordingSession:
             self._started_at = episode.started_at
             self._stopped_at = self._first_sample_at = self._last_sample_at = 0.0
             self._late_frames = 0
+            self._skipped_samples = 0
             self._max_frame_gap_s = 0.0
             self._quality_max = {}
             self._last_camera_timestamps = {}
@@ -247,7 +250,7 @@ class RecordingSession:
             time.time(),
         )
         try:
-            writer.save_episode(result)
+            receipt = writer.save_episode(result)
         except Exception as exc:
             self._last_error = f"保存失败，请检查数据目录，不要重复提交：{exc}"
             raise
@@ -260,6 +263,12 @@ class RecordingSession:
                 **asdict(result),
                 "task": self._episode_metadata.task,
                 "context": dict(self._episode_metadata.context),
+                "episode_index": self._episode_metadata.episode_index,
+                "local_episode_index": self._episode_metadata.episode_index,
+                "dataset_id": self._session_metadata.dataset_id,
+                "root": self._session_root,
+                "format": writer.format_name,
+                **(receipt if isinstance(receipt, Mapping) else {}),
             }
             self._episode_metadata = None
         self._event("info", f"Episode saved: {count} frames; total {self._saved_episodes}")
@@ -326,12 +335,18 @@ class RecordingSession:
                 pending_first = None
                 self._add_frame(sample)
                 next_sample += period
-                wait_time = next_sample - time.monotonic()
+                completed_at = time.monotonic()
+                if completed_at > next_sample:
+                    # These scheduled sample slots really were skipped: one
+                    # synchronous write/ACK is still in flight, with no backlog.
+                    # A slot at completed_at is still available for capture.
+                    skipped = math.ceil((completed_at - next_sample) / period)
+                    with self._lock:
+                        self._skipped_samples += skipped
+                    next_sample += skipped * period
+                wait_time = next_sample - completed_at
                 if wait_time > 0:
                     self._episode_stop.wait(wait_time)
-                else:
-                    # Do not create an unbounded backlog if camera/encoding is slow.
-                    next_sample = time.monotonic()
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             with self._lock:
@@ -400,15 +415,25 @@ class RecordingSession:
                 if self._buffered_frames > 1 and span > 0
                 else 0.0,
                 "late_frames": self._late_frames,
+                "skipped_samples": self._skipped_samples,
+                "dropped_frames": None,
+                "metric_semantics": {
+                    "effective_fps": "acknowledged_samples_over_capture_timestamp_span",
+                    "late_frames": "acknowledged_sample_gaps_over_1.5_periods",
+                    "skipped_samples": "scheduled_sample_slots_skipped_while_capture_or_ack_busy",
+                    "dropped_frames": "unknown_no_camera_sequence_or_confirmed_loss_counter",
+                    "reused_camera_frames": "unchanged_camera_timestamp_in_acknowledged_samples",
+                },
                 "max_frame_gap_s": self._max_frame_gap_s,
                 "reused_camera_frames": dict(self._reused_camera_frames),
                 "max": dict(self._quality_max),
                 "timestamp_basis": "host_monotonic_receipt_not_hardware_sync",
             }
-            quality["needs_review"] = bool(
+            quality["needs_review"] = self._episode_metadata is not None and bool(
                 self._buffered_frames < 2
                 or quality["effective_fps"] < 0.9 * self.fps
                 or self._late_frames
+                or self._skipped_samples
                 or any(self._reused_camera_frames.values())
                 or self._quality_max.get("tracking_error_exceeded", 0.0) > 0.0
                 or self._quality_max.get("desired_tracking_error_exceeded", 0.0) > 0.0
@@ -429,6 +454,9 @@ class RecordingSession:
                 "saved_episodes": self._saved_episodes,
                 "duration": duration,
                 "task": self._task,
+                "episode_index": self._episode_metadata.episode_index
+                if self._episode_metadata
+                else None,
                 "root": self._session_root,
                 "format": getattr(self._writer or self.writer_factory, "format_name", ""),
                 "validation": self._validation_report,

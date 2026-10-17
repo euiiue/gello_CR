@@ -11,7 +11,7 @@ import math
 import queue
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from gello_cr.app.config_store import TeleopConfigStore
@@ -62,6 +62,7 @@ class TeleopRuntime:
         self._state = "idle"
         self._last_error = ""
         self._diagnostics = {}
+        self._recording_snapshot = None
         self._stop_generation = 0
         self._follow_stop = threading.Event()
         self._home_stop = threading.Event()
@@ -199,7 +200,9 @@ class TeleopRuntime:
                 self._set_state("idle")
             self._event("info", "CR5 已接入遥操作引擎")
 
-    def detach_robot(self, robot: NrcRobotAdapter | None, reason: str) -> bool:
+    def detach_robot(
+        self, robot: NrcRobotAdapter | None, reason: str, *, expected: bool = False
+    ) -> bool:
         """Detach only the expected stale adapter and stop local command producers."""
         with self._robot_connection_lock:
             with self._state_lock:
@@ -209,9 +212,18 @@ class TeleopRuntime:
                     return False
             stop_error = None
             try:
-                self.motion.cancel_all(reason)
+                if expected:
+                    self.stop_motion(reason)
+                else:
+                    self.motion.cancel_all(reason)
             except Exception as exc:
                 stop_error = exc
+            if expected and stop_error is not None:
+                message = f"CR5 断开前停止失败：{stop_error}"
+                if self.state != "closed":
+                    self._set_state("fault", message)
+                self._event("error", message)
+                raise stop_error
             with self._state_lock:
                 self.robot = None
                 self._stop_generation += 1
@@ -227,9 +239,9 @@ class TeleopRuntime:
             except Exception as exc:
                 self._event("error", f"CR5 掉线后主臂保持失败: {exc}")
             message = f"CR5 连接断开：{reason}"
-            if self.state != "closed":
+            if self.state != "closed" and (not expected or stop_error is not None):
                 self._set_state("fault", message)
-            self._event("error", message)
+            self._event("info" if expected and stop_error is None else "error", message)
             if stop_error is not None:
                 raise stop_error
             return True
@@ -325,8 +337,7 @@ class TeleopRuntime:
             self._dataset_action_timestamp = time.monotonic()
 
     def _set_dataset_target_joints(self, joints_deg: Sequence[Any]) -> None:
-        # 关节记录模式下，HOME 回位期间没有 GELLO 跟随目标；这里把 HOME 关节
-        # 目标（SDK 角度单位）当作 action，让 dataset_sample() 能继续出样本。
+        # Store the active motion target in SDK degree units for capture.
         controller_values = tuple(float(value) for value in joints_deg[:6])
         if len(controller_values) != 6 or any(
             not math.isfinite(value) for value in controller_values
@@ -508,8 +519,26 @@ class TeleopRuntime:
     def save_home(self) -> dict[str, Any]:
         return self.home_service.save_home()
 
-    def return_home(self, stop_recording: Callable[[], None]) -> None:
-        return self.home_service.return_home(stop_recording)
+    def set_recording_snapshot(self, provider) -> None:
+        """Share Episode ownership with direct runtime motion entry points."""
+        self._recording_snapshot = provider
+
+    def return_home(self) -> None:
+        return self.home_service.return_home()
+
+    def operation_snapshot(self) -> dict[str, Any]:
+        """Cached observations used by command policy, without device I/O."""
+        motion = self.motion.status
+        with self._state_lock:
+            return {
+                "state": self._state,
+                "error": self._last_error,
+                "o6_action_active": self._o6_action_active,
+                "motion": {
+                    "source": motion.source.name if motion.source is not None else None,
+                    "running": motion.running,
+                },
+            }
 
     def acknowledge_fault(self) -> None:
         """Clear the local runtime fault latch after hardware recovery.

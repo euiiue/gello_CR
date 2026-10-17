@@ -29,7 +29,7 @@ class Recorder:
         self.frames = 0
 
 
-def test_replay_and_dataset_episode_have_independent_application_commands():
+def test_replay_recording_uses_explicit_source_and_global_stop_keeps_pending_episode():
     recorder = Recorder()
     calls = []
     engine = SimpleNamespace(
@@ -41,16 +41,17 @@ def test_replay_and_dataset_episode_have_independent_application_commands():
         service, teleop_engine=engine, recorder=recorder, recording_snapshot=recorder.snapshot
     ).install()
     service.dispatch(Command.REPLAY_TRAJECTORY, {"trajectory_id": "demo"})
-    service.dispatch(Command.START_EPISODE, {"task": "pick", "base_root": "/tmp"})
+    service.dispatch(Command.START_EPISODE, {
+        "task": "pick", "base_root": "/tmp", "source": "replay",
+    })
     vm = build_application_view_model(
         service.snapshot(), {"motion": {"source": "REPLAY"}}, recorder.snapshot()
     )
     assert vm.motion_state is MotionState.REPLAY
     assert vm.recording_state is RecordingState.RECORDING
     service.dispatch(Command.STOP_MOTION)
-    assert recorder.active
+    assert not recorder.active
     assert service.state is WorkflowState.ROBOT_ENABLED
-    service.dispatch(Command.STOP_EPISODE)
     assert service.snapshot().recording_state is RecordingState.PENDING
     service.dispatch(Command.SAVE_SUCCESS)
     assert service.snapshot().recording_state is RecordingState.IDLE

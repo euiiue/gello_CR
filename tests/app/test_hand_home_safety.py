@@ -57,7 +57,7 @@ def test_home_never_moves_with_expired_connected_hand_feedback(runtime):
     hand = runtime.o6
     hand.latest = lambda: (hand.position, hand.fault, time.monotonic() - 10)
     with pytest.raises(RuntimeError, match="feedback expired"):
-        runtime.return_home(lambda: None)
+        runtime.return_home()
     assert runtime.robot.movej_targets == []
     assert runtime.motion.current_owner is None
 
@@ -70,6 +70,6 @@ def test_home_cannot_report_success_using_expired_arrival_feedback(runtime):
         time.monotonic() - (10 if runtime.robot.movej_targets else 0),
     )
     with pytest.raises(RuntimeError, match="feedback expired"):
-        runtime.return_home(lambda: None)
+        runtime.return_home()
     assert runtime.state == "fault"
     assert runtime.motion.current_owner is None

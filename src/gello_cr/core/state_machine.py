@@ -35,6 +35,7 @@ class Command(Enum):
     STOP_TELEOP = auto()
     START_EPISODE = auto()
     STOP_EPISODE = auto()
+    FINISH_EPISODE = auto()
     FINALIZE_DATASET = auto()
     SELECT_DATASET_FORMAT = auto()
     CREATE_DATASET = auto()
@@ -99,6 +100,7 @@ class RecordingState(Enum):
     IDLE = auto()
     RECORDING = auto()
     PENDING = auto()
+    SAVING = auto()
     FINALIZING = auto()
     RECOVERING = auto()
 
@@ -175,20 +177,26 @@ class WorkflowStateMachine:
     def motion_state(self):
         return _MOTION.get(self.state, MotionState.IDLE)
 
-    def can(self, command):
+    def can(self, command, *, source="teleop"):
         if command is Command.STOP_CAMERAS and self.state is WorkflowState.DAGGER_RUNNING:
             return False
         if command in _AUXILIARY:
             return True  # Concrete handlers enforce writer/session preconditions.
         if command is Command.START_EPISODE:
             return (
-                self.state in _ENABLED
-                and self.state is not WorkflowState.DAGGER_RUNNING
+                self.state
+                is {
+                    "teleop": WorkflowState.TELEOP_RUNNING,
+                    "replay": WorkflowState.REPLAY_RUNNING,
+                    "point_move": WorkflowState.POINT_MOVE_RUNNING,
+                }.get(source)
                 and self.recording_state is RecordingState.IDLE
             )
         if command is Command.STOP_EPISODE:
             return self.recording_state is RecordingState.RECORDING
-        if command in (Command.SAVE_SUCCESS, Command.SAVE_FAILURE, Command.DISCARD_EPISODE):
+        if command in (Command.FINISH_EPISODE, Command.DISCARD_EPISODE):
+            return self.recording_state in (RecordingState.RECORDING, RecordingState.PENDING)
+        if command in (Command.SAVE_SUCCESS, Command.SAVE_FAILURE):
             return self.recording_state is RecordingState.PENDING and (
                 command is not Command.SAVE_SUCCESS or self.state in _ENABLED
             )
@@ -225,9 +233,12 @@ class WorkflowStateMachine:
         if command is Command.STOP_MOTION:
             return self.state is not WorkflowState.OFFLINE
         if command is Command.RETURN_HOME:
-            return self.state not in (WorkflowState.OFFLINE, WorkflowState.RETURNING_HOME)
+            return (
+                self.state is WorkflowState.ROBOT_ENABLED
+                and self.recording_state is RecordingState.IDLE
+            )
         if command is Command.HOME_COMPLETED:
-            return self.state is not WorkflowState.OFFLINE
+            return self.state is WorkflowState.RETURNING_HOME
         if command is Command.EMERGENCY_STOP:
             return self.state is not WorkflowState.ESTOP
         if command is Command.REPORT_FAULT:
@@ -238,8 +249,8 @@ class WorkflowStateMachine:
             return self.state is WorkflowState.ESTOP
         return (self.state, command) in _TRANSITIONS
 
-    def apply(self, command, *, validated=False):
-        if not validated and not self.can(command):
+    def apply(self, command, *, validated=False, source="teleop"):
+        if not validated and not self.can(command, source=source):
             raise InvalidTransition(
                 f"{command.name} is not allowed from {self.state.name} / "
                 f"{self.recording_state.name}"
@@ -251,6 +262,7 @@ class WorkflowStateMachine:
         elif command in (
             Command.SAVE_SUCCESS,
             Command.SAVE_FAILURE,
+            Command.FINISH_EPISODE,
             Command.DISCARD_EPISODE,
             Command.SUSPEND_BATCH,
             Command.DISCARD_BATCH,

@@ -11,11 +11,11 @@
 | `joint` | 12 维：J1–J6 实测关节（rad）+ O6 六电机位置 | 12 维：J1–J6 已接受并提交的绝对关节目标（rad）+ O6 六电机目标 |
 | `tcp` | 18 维：J1–J6（rad）+ TCP XYZ（m）+ RPY（rad）+ O6 六电机位置 | 12 维：当前实测 TCP 到已接受目标的 XYZ 差值（m）+ 最短 RPY 差值（rad）+ O6 六电机目标 |
 
-O6 六维顺序是拇指弯曲、拇指侧摆、食指、中指、无名指、小指；位置和目标是设备原始 0..255 值，不是 rad。SDK 接受命令不表示机器人已执行到位。joint 采集要求有活动控制源及已下发目标；回放、规划、HOME 和 Teleop 共享运动目标来源。停止运动不会自动结束或成功保存 Episode。
+O6 六维顺序是拇指弯曲、拇指侧摆、食指、中指、无名指、小指；位置和目标是设备原始 0..255 值，不是 rad。SDK 接受命令不表示机器人已执行到位。joint 采集要求有活动控制源及已下发目标；Teleop、回放和走点采集需显式选择对应来源，HOME 不启动 Episode。全局停止会停止采样并保留 Pending，运动自然结束也不会自动判定 Episode 成功。
 
 `CaptureFrame.timestamp` 是主机 monotonic 秒，用于排序和帧间隔；相机时间戳、Age、Skew 同属主机采样质量信息，不构成硬件同步保证。导出的训练时间由 Episode 帧序和 FPS 生成；原始主机时间、命令 Age、相机时间和质量保存在采集元数据中。创建时间采用 UTC ISO 时间，Episode 另保留 Unix 秒，便于跨进程关联。
 
-采样周期由 `dataset.fps` 决定，GUI 使用 `ui.refresh_ms`，相机缓存更新使用 `dataset.camera_poll_hz`。同一相机帧可能被重复采样；Session 记录复用帧、迟帧、最大间隔和质量指标。开始 Episode 前会拒绝缺失、过期或 Skew 超限的图像。采集中出现的质量问题需要查看 Episode 的 `needs_review` 和质量摘要，不能只看保存按钮是否成功。
+采样周期由 `dataset.fps` 决定，GUI 使用 `ui.refresh_ms`，相机缓存更新使用 `dataset.camera_poll_hz`。同一相机帧可能被重复采样；Session 分别记录复用帧、迟帧、跳过的采样槽和质量指标，不把它们冒充相机丢帧。开始 Episode 前会拒绝缺失、过期或 Skew 超限的图像。录制中必要图像失联或过期会停止采样并保留 Pending；Skew 等质量问题记录在 `needs_review` 和质量摘要中，不能只看保存按钮是否成功。
 
 ## 三路图像
 

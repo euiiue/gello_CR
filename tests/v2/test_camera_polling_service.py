@@ -142,7 +142,22 @@ def test_camera_worker_surfaces_device_error() -> None:
         time.sleep(0.01)
 
     assert "base stream failed" in service.error
+    assert source.base is source.wrist is source.roi is None
     service.stop()
+
+
+def test_camera_worker_invalidates_cached_images_on_disconnect():
+    service, wrist, base, source = _service()
+    service.start()
+    try:
+        base.connected = False
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not service.error:
+            time.sleep(0.01)
+        assert 'base' in service.error
+        assert source.base is source.wrist is source.roi is None
+    finally:
+        service.stop()
 
 
 def test_three_physical_cameras_publish_distinct_images_and_close():

@@ -42,7 +42,7 @@ def test_robot_enabled_allows_start_teleop() -> None:
 
     assert policy[Command.START_TELEOP]
     assert policy[Command.EMERGENCY_STOP]
-    assert policy[Command.START_EPISODE]
+    assert not policy[Command.START_EPISODE]
 
 
 def test_teleop_running_allows_episode_start() -> None:
@@ -58,7 +58,7 @@ def test_teleop_running_allows_episode_start() -> None:
     assert not policy[Command.DISCARD_EPISODE]
 
 
-def test_recording_active_only_allows_episode_stop() -> None:
+def test_zero_frame_recording_allows_stop_or_discard() -> None:
     policy = command_availability(
         WorkflowState.TELEOP_RUNNING,
         episode_active=True,
@@ -69,7 +69,8 @@ def test_recording_active_only_allows_episode_stop() -> None:
     assert not policy[Command.START_EPISODE]
     assert not policy[Command.SAVE_SUCCESS]
     assert not policy[Command.SAVE_FAILURE]
-    assert not policy[Command.DISCARD_EPISODE]
+    assert not policy[Command.FINISH_EPISODE]
+    assert policy[Command.DISCARD_EPISODE]
 
 
 def test_stopped_pending_recording_allows_save_discard_and_save_then_next() -> None:
@@ -106,8 +107,7 @@ def test_safe_state_allows_only_failure_resolution_for_pending_episode(
 
 
 def test_robot_enabled_allows_full_resolution_for_pending_episode() -> None:
-    # After HOME, the workflow lands on ROBOT_ENABLED with a pending Episode;
-    # the operator must still be able to save it as success.
+    # Stopping teleop can leave buffered data on ROBOT_ENABLED.
     policy = command_availability(
         WorkflowState.ROBOT_ENABLED,
         episode_active=False,

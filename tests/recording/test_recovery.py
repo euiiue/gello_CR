@@ -90,6 +90,61 @@ def test_resume_creates_a_new_segment_and_requires_a_partial_decision(tmp_path):
     assert (tmp_path / "staging" / batch_id / "segment_000" / "dataset").exists()
 
 
+@pytest.mark.parametrize("selected_format", [DatasetFormat.LEROBOT_V21, DatasetFormat.LEROBOT_V3])
+def test_resume_adopts_hdf5_batch_format_without_starting_sampling(tmp_path, selected_format):
+    h5py = pytest.importorskip("h5py")
+    first = make_manager(tmp_path)
+    record_some(first, tmp_path)
+    first.save_episode("success")
+    batch_id = first.snapshot()["batch_id"]
+    first.suspend("test interruption")
+    resumed = make_manager(tmp_path)
+    resumed.writer_factory.select(selected_format)
+
+    def unexpected_capture():
+        raise AssertionError("Resume must not start camera sampling")
+
+    resumed.session.source = SimpleNamespace(capture=unexpected_capture)
+    try:
+        resumed.recovery.resume(batch_id)
+        snapshot = resumed.snapshot()
+        assert snapshot["session_active"]
+        assert not snapshot["episode_active"]
+        assert not snapshot["episode_pending"]
+        assert snapshot["buffered_frames"] == 0
+        assert snapshot["format"] == "hdf5"
+        assert resumed.writer_factory.format_name == "hdf5"
+        assert resumed._segment_writer.writer.format_name == "hdf5"
+        final = Path(resumed.finalize())
+        with h5py.File(final / "dataset.hdf5", "r") as file:
+            assert len(file["episodes"]) == 1
+            assert file["episodes/000000/metadata"].attrs["outcome"] == "success"
+    finally:
+        resumed.close()
+
+
+def test_resume_restores_selected_format_when_segment_open_fails(tmp_path, monkeypatch):
+    first = make_manager(tmp_path)
+    first.create_dataset("pick motor", tmp_path / "train")
+    batch_id = first.snapshot()["batch_id"]
+    first.suspend("test interruption")
+    resumed = make_manager(tmp_path)
+    resumed.writer_factory.select(DatasetFormat.LEROBOT_V3)
+    selected_config = resumed.writer_factory.config
+
+    def unavailable(writer, metadata):
+        assert resumed.writer_factory.format_name == "hdf5"
+        assert writer.format_name == "hdf5"
+        raise OSError("recovery writer unavailable")
+
+    monkeypatch.setattr(resumed.session, "open_writer", unavailable)
+    with pytest.raises(OSError, match="recovery writer unavailable"):
+        resumed.recovery.resume(batch_id)
+    assert resumed.writer_factory.config == selected_config
+    assert not resumed.snapshot()["session_active"]
+    assert resumed.recovery.scan()[0]["batch_id"] == batch_id
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -109,8 +164,12 @@ def test_resume_rejects_changed_capture_profile(tmp_path, field, value):
     profile = recording_profile(mode="joint", fps=20, image_size=(16, 16))
     profile[field] = value
     changed = make_manager(tmp_path, profile)
+    changed.writer_factory.select(DatasetFormat.LEROBOT_V3)
+    selected_config = changed.writer_factory.config
     with pytest.raises(RecordingError, match=field):
         changed.recovery.resume(batch_id)
+    assert changed.writer_factory.config == selected_config
+    assert not changed.snapshot()["session_active"]
     assert not (tmp_path / "staging" / batch_id / "segment_001").exists()
 
 
@@ -157,7 +216,18 @@ def test_episode_boundary_resume_and_explicit_global_index_mapping(tmp_path):
     assert resumed.snapshot()["next_episode_index"] == 2
     assert not resumed.snapshot()["partial_episodes"]
     record_some(resumed, tmp_path)
+    assert resumed.snapshot()['episode_index'] == 2
+    assert resumed.snapshot()['local_episode_index'] == 0
     resumed.save_episode("failure")
+    receipt = resumed.snapshot()['last_saved']
+    assert receipt['episode_index'] == 2
+    assert receipt['local_episode_index'] == 0
+    assert receipt['batch_id'] == batch_id
+    assert receipt['segment_id'] == 'segment_001'
+    assert Path(receipt['episode_path']).is_dir()
+    assert Path(receipt['journal_path']).is_file()
+    assert receipt['dataset_id'] == resumed.snapshot()['dataset_id']
+    assert receipt['root'] == resumed.snapshot()['root']
     final = Path(resumed.finalize())
     mapping = json.loads((final / "batch_provenance.json").read_text())["episode_mapping"]
     assert [r["global_episode_index"] for r in mapping] == [0, 1, 2]

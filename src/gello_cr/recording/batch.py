@@ -77,6 +77,8 @@ class BatchManager:
         self._batch = self._segment = self._segment_writer = self._batch_lock = None
         self._records = []
         self._lock = threading.RLock()
+        # Manifest durability remains serialized, independently of fast UI reads.
+        self._manifest_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = None
         self._last_error = ""
@@ -188,11 +190,13 @@ class BatchManager:
         self._event("info", f"Segment opened · batch_id={batch.batch_id} · segment={segment_id}")
 
     def _allocate_episode(self):
-        with self._lock:
-            index = self._batch.next_episode_index
-            self._batch.next_episode_index += 1
-            self._batch.save(self.batch_root(self._batch.batch_id))
-            self._segment.episode_end_index = index
+        with self._manifest_lock:
+            with self._lock:
+                index = self._batch.next_episode_index
+                self._batch.next_episode_index += 1
+                batch = deepcopy(self._batch)
+                self._segment.episode_end_index = index
+            batch.save(self.batch_root(batch.batch_id))
             return index
 
     def _episode_changed(self, record):
@@ -207,15 +211,19 @@ class BatchManager:
         writer = self._segment_writer
         if writer is not None:
             writer.checkpoint()
-        with self._lock:
-            if self._segment is not None and self._segment.status == SegmentStatus.ACTIVE:
+        with self._manifest_lock:
+            with self._lock:
+                if self._segment is None or self._segment.status != SegmentStatus.ACTIVE:
+                    return
                 self._segment.frame_count = sum(
                     r["frame_count"]
                     for r in self._records
                     if r["segment_id"] == self._segment.segment_id
                 )
                 self._segment.last_update_at = now()
-                self._segment.save(self.batch_root(self._batch.batch_id) / self._segment.segment_id)
+                segment = deepcopy(self._segment)
+                root = self.batch_root(self._batch.batch_id) / segment.segment_id
+            segment.save(root)
 
     def _start_heartbeat(self):
         self._stop_heartbeat()
@@ -358,6 +366,7 @@ class BatchManager:
             batch = self._batch
             if batch is not None:
                 records = self._records
+                current_record = getattr(self._segment_writer, "record", None)
                 value.update(
                     session_active=True,
                     batch_task=batch.task_name,
@@ -367,6 +376,10 @@ class BatchManager:
                     batch_status=batch.status,
                     segment_id=self._segment.segment_id if self._segment else "",
                     next_episode_index=batch.next_episode_index,
+                    local_episode_index=value.get("episode_index"),
+                    episode_index=current_record["episode_index"]
+                    if current_record is not None
+                    else None,
                     format=batch.dataset_format,
                     saved_episodes=len(selected_records(records)),
                     success_episodes=sum(
@@ -409,20 +422,18 @@ class BatchManager:
             raise RecordingError("请先处理当前批次")
         root = self.batch_root(batch_id)
         lock = BatchLock(root).acquire()
+        previous_config = self.writer_factory.config
         try:
             batch = BatchManifest.load(root)
             if batch.status in (BatchStatus.COMPLETED, BatchStatus.DISCARDED):
                 raise RecordingError("Batch is already completed or discarded")
             if batch.final_path and Path(batch.final_path).exists():
                 raise RecordingError("Dataset may already be published; finalize this batch first")
-            if self.writer_factory.format_name != batch.dataset_format:
-                raise RecordingError(
-                    "dataset_format mismatch; select the batch format before resume"
-                )
             profile = self.profile_provider()
             for key in PROFILE_FIELDS:
                 if profile[key] != batch.profile[key]:
                     raise RecordingError(f"Resume blocked: {key} mismatch")
+            self.writer_factory.select(batch.dataset_format)
             records = self.recovery.inspect_segments(batch, root)
             self._batch, self._batch_lock, self._records = batch, lock, records
             self._final_root, self._final_validation, self._final_dataset_id = "", None, ""
@@ -431,6 +442,7 @@ class BatchManager:
             )
             self._new_segment()
         except Exception:
+            self.writer_factory.config = previous_config
             if self._batch is None:
                 lock.release()
             else:

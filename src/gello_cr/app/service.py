@@ -23,6 +23,7 @@ from gello_cr.core.state_machine import (
 )
 
 from .events import AppEvent, EventLevel
+from .permissions import SAFETY_COMMANDS, OperationContext, operation_permission
 
 CommandHandler = Callable[[Mapping[str, Any]], Any]
 EventSubscriber = Callable[[AppEvent], None]
@@ -86,11 +87,17 @@ class ApplicationService:
         self._last_error = ""
         self._preemption_generation = 0
         self._recording_snapshot = None
+        self._runtime_snapshot = None
+        self._readiness_snapshot = None
         self._active_command = None
         self._last_safety_command = None
 
     def set_recording_snapshot(self, provider):
         self._recording_snapshot = provider
+
+    def set_permission_sources(self, *, runtime_snapshot=None, readiness_snapshot=None):
+        self._runtime_snapshot = runtime_snapshot
+        self._readiness_snapshot = readiness_snapshot
 
     def _sync_recording(self):
         if self._recording_snapshot is not None:
@@ -102,6 +109,8 @@ class ApplicationService:
                 if value.get("episode_pending", bool(value.get("buffered_frames")))
                 else RecordingState.IDLE
             )
+            return value
+        return None
 
     @property
     def state(self) -> WorkflowState:
@@ -120,10 +129,30 @@ class ApplicationService:
                 active_command=self._active_command,
             )
 
-    def can(self, command: Command) -> bool:
+    def permission(self, command: Command, payload: Mapping[str, Any] | None = None):
         with self._lock:
-            self._sync_recording()
-            return self._state_machine.can(command)
+            return self._permission_locked(command, payload)
+
+    def can(self, command: Command, payload: Mapping[str, Any] | None = None) -> bool:
+        return self.permission(command, payload).allowed
+
+    def _permission_locked(self, command, payload=None):
+        # STOP/F12 must never wait for recorder/device observations.
+        safety = command in SAFETY_COMMANDS
+        recorder = None if safety else self._sync_recording()
+        runtime = self._runtime_snapshot() if not safety and self._runtime_snapshot else None
+        readiness = self._readiness_snapshot() if not safety and self._readiness_snapshot else None
+        return operation_permission(
+            command,
+            OperationContext(
+                self._state_machine.state,
+                self._state_machine.recording_state,
+                recorder,
+                runtime,
+                readiness,
+            ),
+            payload,
+        )
 
     def set_handler(
         self,
@@ -376,12 +405,12 @@ class ApplicationService:
         command: Command,
         data: Mapping[str, Any],
     ) -> None:
-        self._sync_recording()
-        if self._state_machine.can(command):
+        permission = self._permission_locked(command, data)
+        if permission.allowed:
             return
 
         previous_state = self._state_machine.state
-        message = f"{command.name} is not allowed from {previous_state.name}"
+        message = f"{command.name} is not allowed from {previous_state.name}: {permission.reason}"
         self._emit_locked(
             kind="command_rejected",
             level=EventLevel.WARNING,

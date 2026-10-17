@@ -6,6 +6,7 @@
 # Generated Python/IDE files.
 **/__pycache__/
 *.py[cod]
+*.egg-info/
 .idea/
 
 # Downloaded/archive copies; keep source files instead.

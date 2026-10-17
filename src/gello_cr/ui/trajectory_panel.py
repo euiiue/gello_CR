@@ -2,22 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QSpinBox,
-    QWidget,
-)
+from PySide6.QtWidgets import QFileDialog, QWidget
 
 from gello_cr.core.state_machine import Command, WorkflowState
+
+from .generated.ui_trajectory_page import Ui_TrajectoryPanel
 
 
 class TrajectoryPanel(QWidget):
@@ -27,100 +16,39 @@ class TrajectoryPanel(QWidget):
         self._snapshot = {}
         self._context = None
         self._catalog = []
-        layout = QGridLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-        self.setStyleSheet("QPushButton { min-height: 22px; padding: 2px 8px; }")
-        self.setMinimumHeight(216)
-
-        self.record_name = QLineEdit()
-        self.record_name.setPlaceholderText("轨迹名称，如 motor_pick_demo_01")
-        self.record_button = QPushButton("开始记录")
-        self.finish_button = QPushButton("停止并保存")
-        self.save_button = QPushButton("重试保存")
-        self.cancel_button = QPushButton("取消记录")
-        record = QHBoxLayout()
-        for widget in (
-            QLabel("名称"),
-            self.record_name,
-            self.record_button,
-            self.finish_button,
-            self.save_button,
-            self.cancel_button,
-        ):
-            record.addWidget(widget)
-        layout.addLayout(record, 0, 0, 1, 2)
-
-        self.saved_combo = QComboBox()
-        self.saved_combo.setMinimumWidth(210)
-        self.refresh_button = QPushButton("刷新")
-        self.import_json_button = QPushButton("导入旧 JSON")
-        self.import_episode_button = QPushButton("导入 LeRobot")
-        self.episode_spin = QSpinBox()
-        self.episode_spin.setRange(0, 1000000)
-        saved = QHBoxLayout()
-        for widget in (
-            QLabel("已保存"),
-            self.saved_combo,
-            self.refresh_button,
-            self.import_json_button,
-            self.import_episode_button,
-            QLabel("Episode"),
-            self.episode_spin,
-        ):
-            saved.addWidget(widget)
-        saved.setStretch(1, 1)
-        layout.addLayout(saved, 1, 0, 1, 2)
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("相对 Relative", "relative")
-        self.mode_combo.addItem("绝对 Absolute", "absolute")
-        self.mode_combo.setToolTip("相对：从当前位置复现位移；绝对：先用 3 秒过渡到轨迹起点")
-        self.speed_spin = QDoubleSpinBox()
-        self.speed_spin.setRange(0.1, 2.0)
-        self.speed_spin.setSingleStep(0.1)
-        self.speed_spin.setValue(1.0)
-        self.speed_spin.setSuffix("×")
-        self.repeat_spin = QSpinBox()
-        self.repeat_spin.setRange(1, 1000)
-        self.arm_check = QCheckBox("Arm")
-        self.hand_check = QCheckBox("Hand")
-        self.arm_check.setChecked(True)
-        self.hand_check.setChecked(True)
-        self.preview_button = QPushButton("预览")
-        self.play_button = QPushButton("回放")
-        options = QHBoxLayout()
-        for widget in (
-            self.mode_combo,
-            QLabel("速度"),
-            self.speed_spin,
-            QLabel("次数"),
-            self.repeat_spin,
-            self.arm_check,
-            self.hand_check,
-            self.preview_button,
-            self.play_button,
-        ):
-            options.addWidget(widget)
-        layout.addLayout(options, 2, 0, 1, 2)
-        mask = QHBoxLayout()
-        mask.addWidget(QLabel("回放关节"))
-        self.joint_checks = [QCheckBox(f"J{i}") for i in range(1, 7)]
+        self._ui = Ui_TrajectoryPanel()
+        self._ui.setupUi(self)
+        self.record_name = self._ui.trajectory_record_name
+        self.record_button = self._ui.trajectory_record_button
+        self.finish_button = self._ui.trajectory_finish_button
+        self.save_button = self._ui.trajectory_save_button
+        self.cancel_button = self._ui.trajectory_cancel_button
+        self.saved_combo = self._ui.trajectory_saved_combo
+        self.refresh_button = self._ui.trajectory_refresh_button
+        self.import_json_button = self._ui.trajectory_import_json_button
+        self.import_episode_button = self._ui.trajectory_import_episode_button
+        self.episode_spin = self._ui.trajectory_episode_spin
+        self.mode_combo = self._ui.trajectory_mode_combo
+        self.speed_spin = self._ui.trajectory_speed_spin
+        self.repeat_spin = self._ui.trajectory_repeat_spin
+        self.arm_check = self._ui.trajectory_arm_check
+        self.hand_check = self._ui.trajectory_hand_check
+        self.preview_button = self._ui.trajectory_preview_button
+        self.play_button = self._ui.trajectory_play_button
+        self.joint_checks = [
+            self._ui.trajectory_joint_checks_0,
+            self._ui.trajectory_joint_checks_1,
+            self._ui.trajectory_joint_checks_2,
+            self._ui.trajectory_joint_checks_3,
+            self._ui.trajectory_joint_checks_4,
+            self._ui.trajectory_joint_checks_5,
+        ]
+        self.status_label = self._ui.trajectory_status_label
+        self.preview_text = self._ui.trajectory_preview_text
+        self._ui.trajectory_mode_combo.setItemData(0, "relative")
+        self._ui.trajectory_mode_combo.setItemData(1, "absolute")
         for check in self.joint_checks:
-            check.setChecked(True)
             check.toggled.connect(self._update_enabled)
-            mask.addWidget(check)
-        self.status_label = QLabel("未录制")
-        mask.addWidget(self.status_label, 1)
-        layout.addLayout(mask, 3, 0, 1, 2)
-        self.preview_text = QPlainTextEdit()
-        self.preview_text.setReadOnly(True)
-        self.preview_text.setMinimumHeight(64)
-        self.preview_text.setMaximumHeight(92)
-        self.preview_text.setPlaceholderText(
-            "选择轨迹后点击预览：时长、关节范围与速度、TCP 和 Hand 范围"
-        )
-        layout.addWidget(self.preview_text, 4, 0, 1, 2)
 
         self.record_button.clicked.connect(
             lambda: self._submit(

@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,15 +29,29 @@ def test_main_window_submits_preparation_commands() -> None:
 
 
 def test_readiness_only_narrows_primary_workflow_buttons() -> None:
-    source = _source("src/gello_cr/app/view_model.py")
-    assert "actions[Command.START_TELEOP] &= devices_ready" in source
-    assert "actions[Command.START_EPISODE] &= cameras_ready" in source
+    from gello_cr.app import ApplicationService, build_application_view_model
+    from gello_cr.core.state_machine import Command, WorkflowState, WorkflowStateMachine
+
+    for state, connected, camera, teleop_allowed, record_allowed in (
+        (WorkflowState.OFFLINE, True, True, False, False),
+        (WorkflowState.ROBOT_ENABLED, False, True, False, False),
+        (WorkflowState.ROBOT_ENABLED, True, True, True, False),
+        (WorkflowState.TELEOP_RUNNING, True, False, False, False),
+        (WorkflowState.TELEOP_RUNNING, True, True, False, True),
+    ):
+        service = ApplicationService(state_machine=WorkflowStateMachine(state))
+        ready = {
+            "master_connected": connected,
+            "o6_connected": connected,
+            "camera_frames_ready": camera,
+        }
+        view = build_application_view_model(service.snapshot(), {}, {}, ready)
+        assert view.actions[Command.START_TELEOP] is teleop_allowed
+        assert view.actions[Command.START_EPISODE] is record_allowed
 
 
 def test_operator_app_does_not_start_devices_or_cameras() -> None:
-    source = _source(
-        "src/gello_cr/bootstrap/operator_app.py"
-    )
+    source = _source("src/gello_cr/bootstrap/operator_app.py")
 
     assert ".cameras.start(" not in source
     assert ".connect_devices(" not in source
@@ -47,9 +60,7 @@ def test_operator_app_does_not_start_devices_or_cameras() -> None:
 
 
 def test_preparation_handlers_live_outside_ui_layer() -> None:
-    source = _source(
-        "src/gello_cr/bootstrap/preparation.py"
-    )
+    source = _source("src/gello_cr/bootstrap/preparation.py")
 
     assert "self._teleop_engine.connect_devices()" in source
     assert "self._cameras.start(" in source

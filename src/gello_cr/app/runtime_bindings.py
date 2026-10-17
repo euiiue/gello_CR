@@ -14,6 +14,7 @@ from gello_cr.trajectory import ReplayMode, ReplayOptions
 
 from .background import BackgroundJobs
 from .datasets import DatasetCatalog
+from .permissions import OperationContext, operation_permission
 from .service import ApplicationService
 
 LifecycleCallback = Callable[[], Any]
@@ -49,7 +50,7 @@ class RuntimeCommandBindings:
         recording_snapshot: Callable[[], Mapping[str, Any]] | None = None,
         episode_metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        self.recording_snapshot = recording_snapshot
+        self.recording_snapshot = recording_snapshot or getattr(recorder, "snapshot", None)
         self.episode_metadata = dict(episode_metadata or {})
         self.readiness_snapshot = readiness_snapshot
         self.service = service
@@ -65,6 +66,14 @@ class RuntimeCommandBindings:
 
     def install(self) -> RuntimeCommandBindings:
         self.service.set_recording_snapshot(self.recording_snapshot)
+        self.service.set_permission_sources(
+            runtime_snapshot=getattr(self.teleop_engine, "operation_snapshot", None)
+            or getattr(self.teleop_engine, "snapshot", None),
+            readiness_snapshot=self.readiness_snapshot,
+        )
+        set_recording_snapshot = getattr(self.teleop_engine, "set_recording_snapshot", None)
+        if callable(set_recording_snapshot):
+            set_recording_snapshot(self.recording_snapshot)
         handlers = {
             Command.STOP_MOTION: self._stop_motion,
             Command.REFRESH_ROBOT_STATUS: lambda p: self.teleop_engine.refresh_robot_status(),
@@ -126,6 +135,7 @@ class RuntimeCommandBindings:
             ),
             Command.SUSPEND_BATCH: lambda p: self.recorder.suspend("operator suspension"),
             Command.STOP_EPISODE: self._stop_episode,
+            Command.FINISH_EPISODE: self._finish_episode,
             Command.FINALIZE_DATASET: lambda p: self.recorder.finalize(),
             Command.SAVE_SUCCESS: self._save_success,
             Command.SAVE_FAILURE: self._save_failure,
@@ -197,7 +207,7 @@ class RuntimeCommandBindings:
         )()
 
     def _start_teleop(self, _payload: Mapping[str, Any]) -> Any:
-        self._require_readiness()
+        self._require_permission(Command.START_TELEOP, _payload)
         return self.teleop_engine.start_follow()
 
     def _stop_teleop(self, payload: Mapping[str, Any]) -> Any:
@@ -217,6 +227,7 @@ class RuntimeCommandBindings:
             metadata={
                 **self.episode_metadata,
                 **dict(metadata or {}),
+                "recording_source": str(payload.get("source", "teleop")),
                 **(
                     {"task_description": str(payload["description"])}
                     if payload.get("description")
@@ -245,13 +256,45 @@ class RuntimeCommandBindings:
     def _stop_episode(self, _payload: Mapping[str, Any]) -> Any:
         return self.recorder.stop_episode()
 
+    def _finish_episode(self, payload: Mapping[str, Any]) -> Any:
+        outcome = payload.get("outcome")
+        if outcome not in ("success", "failure"):
+            raise ValueError("请选择 Episode 结果 outcome：success 或 failure")
+        self.recorder.stop_episode()
+        return (self._save_success if outcome == "success" else self._save_failure)(payload)
+
+    def _require_permission(self, command, payload=None):
+        application = self.service.snapshot()
+        runtime_snapshot = getattr(self.teleop_engine, "operation_snapshot", None) or getattr(
+            self.teleop_engine,
+            "snapshot",
+            None,
+        )
+        # Recheck the binding's live providers immediately before side effects,
+        # including callers that invoke a concrete operation before install().
+        permission = operation_permission(
+            command,
+            OperationContext(
+                application.state,
+                application.recording_state,
+                self.recording_snapshot() if self.recording_snapshot else None,
+                runtime_snapshot() if runtime_snapshot else None,
+                self.readiness_snapshot() if self.readiness_snapshot else None,
+            ),
+            payload,
+        )
+        if not permission.allowed:
+            raise InvalidTransition(permission.reason)
+
     def _save_success(self, payload: Mapping[str, Any]) -> Any:
+        self._require_permission(Command.SAVE_SUCCESS, payload)
         return self.recorder.save_episode(
             "success",
             str(payload.get("notes", "")),
         )
 
     def _save_failure(self, payload: Mapping[str, Any]) -> Any:
+        self._require_permission(Command.SAVE_FAILURE, payload)
         return self.recorder.save_episode(
             "failure",
             str(payload.get("notes", "")),
@@ -281,7 +324,7 @@ class RuntimeCommandBindings:
             raise RuntimeError("HOME 完成状态已被其他动作或停止覆盖")
 
     def _return_home(self, _payload: Mapping[str, Any]) -> None:
-        self.teleop_engine.return_home(self.recorder.stop_episode)
+        self.teleop_engine.return_home()
         self._home_completed(_payload)
 
     def _reset_fault(self, _payload: Mapping[str, Any]) -> Any:
@@ -303,6 +346,7 @@ class RuntimeCommandBindings:
         return self.teleop_engine.save_trajectory()
 
     def _replay_trajectory(self, payload):
+        self._require_permission(Command.REPLAY_TRAJECTORY, payload)
         options = dict(payload.get("options", {}))
         options["mode"] = ReplayMode(options.get("mode", "relative"))
         if options.get("joint_mask") is not None:
@@ -344,11 +388,7 @@ class RuntimeCommandBindings:
             pass  # STOP/HOME/ESTOP or a newer replay already owns the workflow.
 
     def _execute_plan(self, payload):
-        snapshot = self.recording_snapshot() if self.recording_snapshot is not None else {}
-        if snapshot.get(
-            "episode_pending", bool(snapshot.get("buffered_frames"))
-        ) and not snapshot.get("episode_active"):
-            raise RuntimeError("请先保存或丢弃待处理 Episode")
+        self._require_permission(Command.EXECUTE_PLAN, payload)
         self._point_serial += 1
         run = self._point_run = self._point_serial
         try:
@@ -386,7 +426,13 @@ class RuntimeCommandBindings:
 
     def _stop_motion(self, payload):
         self._trajectory_run = self._point_run = None
-        return self.teleop_engine.stop_motion(str(payload.get("reason", "人工停止运动")))
+        try:
+            return self.teleop_engine.stop_motion(str(payload.get("reason", "人工停止运动")))
+        finally:
+            if self.recording_snapshot is not None and self.recording_snapshot().get(
+                "episode_active"
+            ):
+                self.recorder.stop_episode()
 
     def close(self, timeout=3.0):
         self._trajectory_run = self._point_run = None

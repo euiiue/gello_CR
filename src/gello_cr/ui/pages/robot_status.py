@@ -3,31 +3,28 @@
 import math
 import time
 
-from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QWidget
 
 from gello_cr.core.state_machine import Command
+
+from ..generated.ui_robot_status_page import Ui_RobotStatusPage
 
 
 class RobotStatusPage(QWidget):
     def __init__(self, submit, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        self.details = QPlainTextEdit()
-        self.details.setReadOnly(True)
-        layout.addWidget(self.details)
-        row = QHBoxLayout()
-        self.refresh_button = QPushButton("读取机器人反馈")
-        self.reset_fault_button = QPushButton("复位故障")
-        self.reset_estop_button = QPushButton("解除软件急停")
+        self._ui = Ui_RobotStatusPage()
+        self._ui.setupUi(self)
+        self.details = self._ui.robot_details
+        self.refresh_button = self._ui.robot_refresh_button
+        self.reset_fault_button = self._ui.robot_reset_fault_button
+        self.reset_estop_button = self._ui.robot_reset_estop_button
         for button, cmd in (
             (self.refresh_button, Command.REFRESH_ROBOT_STATUS),
             (self.reset_fault_button, Command.RESET_FAULT),
         ):
             button.clicked.connect(lambda checked=False, command=cmd: submit(command))
         self.reset_estop_button.clicked.connect(lambda: submit(Command.RESET_ESTOP))
-        for button in (self.refresh_button, self.reset_fault_button, self.reset_estop_button):
-            row.addWidget(button)
-        layout.addLayout(row)
 
     def render(self, view, readiness, diagnostics, busy=False):
         def numbers(values, scale):

@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 UI_ROOT = Path(__file__).resolve().parents[2] / "src/gello_cr/ui"
@@ -47,14 +46,6 @@ def test_window_exposes_stop_episode_command() -> None:
 
     assert "Command.STOP_EPISODE" in source
     assert "episode_stop_button" in source
-
-
-def test_window_renders_view_model_policy() -> None:
-    source = _source('pages/collection.py')
-    assert 'view.actions.get(command' in source
-    assert 'Command.START_TELEOP' in source
-    assert 'Command.START_EPISODE' in source
-    assert 'view.actions[Command.RESET_ESTOP]' in _source('pages/robot_status.py')
 
 
 def test_preview_explicitly_contains_no_hardware_backend() -> None:

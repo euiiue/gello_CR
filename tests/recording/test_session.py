@@ -57,14 +57,18 @@ def test_session_drives_generic_writer_and_preserves_pending_lifecycle(tmp_path,
     session = RecordingSession(
         Source(), lambda: writer, event_callback=lambda *a: None, fps=20, image_size=(2, 2)
     )
+    assert not session.snapshot()["quality"]["needs_review"]
     session.start_episode("pick", str(tmp_path), metadata={"operator": "test"})
     assert writer.frame_added.wait(1)
+    assert session.snapshot()["quality"]["needs_review"]
     session.stop_episode()
     assert session.snapshot()["buffered_frames"] > 0
     assert not session.snapshot()["episode_active"]
+    assert session.snapshot()["quality"]["needs_review"]
     with pytest.raises(RuntimeError, match="未处理"):
         session.finalize()
     session.save_episode(outcome, "review")
+    assert not session.snapshot()["quality"]["needs_review"]
     writer.frame_added.clear()
     session.start_episode("pick", str(tmp_path))
     assert writer.frame_added.wait(1)

@@ -2,6 +2,7 @@ import pytest
 
 from gello_cr.core.state_machine import (
     Command,
+    InvalidTransition,
     MotionState,
     RecordingState,
     RobotState,
@@ -13,7 +14,9 @@ from gello_cr.core.state_machine import (
 def test_recording_is_independent_of_replay_and_its_completion():
     state = WorkflowStateMachine(WorkflowState.ROBOT_ENABLED)
     state.apply(Command.REPLAY_TRAJECTORY)
-    assert state.apply(Command.START_EPISODE) is WorkflowState.REPLAY_RUNNING
+    with pytest.raises(InvalidTransition):
+        state.apply(Command.START_EPISODE)
+    assert state.apply(Command.START_EPISODE, source="replay") is WorkflowState.REPLAY_RUNNING
     assert state.recording_state is RecordingState.RECORDING
     assert state.apply(Command.TRAJECTORY_COMPLETED) is WorkflowState.ROBOT_ENABLED
     assert state.recording_state is RecordingState.RECORDING
@@ -38,10 +41,13 @@ def test_teleop_and_recording_stop_are_independent():
     assert not state.can(Command.START_EPISODE)
 
 
-@pytest.mark.parametrize("motion", [WorkflowState.REPLAY_RUNNING, WorkflowState.POINT_MOVE_RUNNING])
-def test_fault_preserves_episode_for_explicit_outcome(motion):
+@pytest.mark.parametrize("motion,source", [
+    (WorkflowState.REPLAY_RUNNING, "replay"),
+    (WorkflowState.POINT_MOVE_RUNNING, "point_move"),
+])
+def test_fault_preserves_episode_for_explicit_outcome(motion, source):
     state = WorkflowStateMachine(motion)
-    state.apply(Command.START_EPISODE)
+    state.apply(Command.START_EPISODE, source=source)
     state.apply(Command.EMERGENCY_STOP)
     assert state.robot_state is RobotState.ESTOP
     assert state.recording_state is RecordingState.RECORDING

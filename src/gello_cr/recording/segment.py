@@ -118,7 +118,16 @@ class SegmentWriter:
             self.journal.close()
             self.journal = None
         self.on_change(self.record)
+        receipt = {
+            "episode_index": self.record["episode_index"],
+            "local_episode_index": self.record["local_episode_index"],
+            "batch_id": self.batch_id,
+            "segment_id": self.segment_id,
+            "episode_path": str(self.record_root),
+            "journal_path": str(self.record_root / "frames.bin"),
+        }
         self.record = None
+        return receipt
 
     def discard_episode(self):
         self.writer.discard_episode()

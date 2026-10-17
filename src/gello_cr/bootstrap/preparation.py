@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from gello_cr.app import ApplicationService
 from gello_cr.core.state_machine import Command
+
+from .robot_profiles import describe_robot
 
 
 class OperatorReadinessProvider:
@@ -29,7 +34,7 @@ class OperatorReadinessProvider:
         if camera.running and not camera_error:
             camera_error = self._runtime.sample_source.readiness_error()
 
-        return {
+        result = {
             "master_type": str(getattr(master, "master_type", "unknown")),
             "master_connected": bool(getattr(master, "connected", False)),
             "master_error": str(getattr(master, "error", "") or ""),
@@ -39,6 +44,68 @@ class OperatorReadinessProvider:
             "camera_frames_ready": bool(camera.running and not camera_error),
             "camera_error": camera_error,
         }
+        store = getattr(self._runtime, "store", None)
+        if store is not None:
+            config = store.data
+            descriptor = describe_robot(config)
+            result.update(
+                robot_profile=descriptor.profile,
+                robot_name=descriptor.name,
+                robot_endpoint=f"{config['robot']['ip']} / Robot {config['robot'].get('robot_num', 1)}",
+                hand_required=descriptor.hand_required,
+                capabilities=asdict(descriptor.capabilities),
+            )
+            now = time.monotonic()
+            master_type = result["master_type"]
+            master_cfg = config.get(master_type, {})
+            port = master_cfg.get("port")
+            if port:
+                result["master_discovered"] = result["master_connected"] or Path(port).exists()
+            latest = getattr(master, "latest", None)
+            if latest is not None:
+                sample = latest()
+                fresh = sample is not None and 0 <= now - sample.timestamp <= float(
+                    master_cfg.get("feedback_timeout_s", 0.5)
+                )
+                result["master_ready"] = (
+                    result["master_connected"] and fresh and not result["master_error"]
+                )
+                if result["master_connected"] and not fresh and not result["master_error"]:
+                    result["master_error"] = "主设备反馈过期或尚未就绪，请检查连接"
+            latest_hand = getattr(o6, "latest", None)
+            if latest_hand is not None:
+                position, fault, sampled_at = latest_hand()
+                fresh = position is not None and 0 <= now - sampled_at <= float(
+                    config.get("o6", {}).get("feedback_timeout_s", 1.2)
+                )
+                result["hand_ready"] = (
+                    result["o6_connected"]
+                    and fresh
+                    and fault is not None
+                    and not any(fault)
+                    and not result["o6_error"]
+                )
+                if result["o6_connected"] and not result["hand_ready"] and not result["o6_error"]:
+                    result["o6_error"] = (
+                        f"末端反馈未就绪或故障：{fault}"
+                        if fault and any(fault)
+                        else "末端反馈过期或尚未就绪"
+                    )
+        lifecycle = getattr(self._runtime, "lifecycle", None)
+        if lifecycle is not None and hasattr(lifecycle, "status_snapshot"):
+            status = lifecycle.status_snapshot()
+            sampled_at = status.get("sampled_at", 0)
+            age = max(0.0, time.monotonic() - sampled_at) if sampled_at else None
+            result.update(
+                robot_connected=status.get("connected", False),
+                servo_state=status.get("servo_state", "unknown"),
+                robot_feedback_age_s=age,
+                robot_error=status.get("error", ""),
+            )
+            if status.get("connected") and (age is None or age > 1.5):
+                result["servo_state"] = "unknown"
+                result["robot_error"] = result["robot_error"] or "机器人反馈过期，请检查连接"
+        return result
 
 
 class OperatorPreparationBindings:

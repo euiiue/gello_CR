@@ -1,6 +1,8 @@
 """Regression coverage for durable capture and pending episode boundaries."""
 
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -11,6 +13,155 @@ from gello_cr.recording.journal import FrameJournal, read_frames
 from gello_cr.recording.session import RecordingSession
 from tests.recording.test_recovery import make_manager, source_frame
 from tests.recording.test_session import Source, Writer
+
+
+@pytest.mark.parametrize('failure', ['stale', 'disconnect'])
+def test_running_camera_loss_retains_pending_and_allows_only_failure_save(tmp_path, failure):
+    import numpy as np
+
+    from gello_cr.recording.source import CR3O6CaptureSource
+
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+    source = CR3O6CaptureSource(
+        lambda: {'timestamp': time.monotonic(), 'observation_state': [0.] * 12,
+                 'action': [0.] * 12, 'recording_mode': 'joint'},
+        {'camera_max_age_s': 0.2, 'camera_max_skew_s': 0.1},
+    )
+    now = time.monotonic()
+    source.update_base(image, image, now)
+    source.update_wrist(image, now)
+    writer = Writer()
+    session = RecordingSession(source, lambda: writer, event_callback=lambda *a: None,
+                               fps=100, image_size=(2, 2))
+    try:
+        session.start_episode('capture', tmp_path)
+        assert writer.frame_added.wait(1)
+        # Normal repeated images remain usable until the configured freshness limit.
+        deadline = time.monotonic() + 0.1
+        while session.snapshot()['buffered_frames'] < 2 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        assert session.snapshot()['episode_active']
+        assert session.snapshot()['buffered_frames'] >= 2
+        if failure == 'disconnect':
+            source.invalidate_streams('USB disconnected: wrist-123')
+        session._episode_thread.join(timeout=1)
+        snapshot = session.snapshot()
+        assert not snapshot['episode_active']
+        assert snapshot['episode_pending']
+        assert snapshot['error']
+        assert 'disconnected' in snapshot['error'] if failure == 'disconnect' else '过期' in snapshot['error']
+        with pytest.raises(RecordingError, match='only as failure'):
+            session.save_episode('success')
+        session.save_episode('failure')
+        assert session.snapshot()['last_saved']['outcome'] == 'failure'
+    finally:
+        if session.snapshot()['episode_pending'] or session.snapshot()['episode_active']:
+            session.discard_episode()
+        session.finalize()
+
+
+def test_sampling_counts_skipped_slots_separately_from_late_and_reused_frames(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr('gello_cr.recording.session.time.monotonic', lambda: clock[0])
+    writer = Writer()
+    original_add = writer.add_frame
+
+    def slow_first_frame(frame):
+        original_add(frame)
+        if len(writer.calls) == 1:
+            clock[0] += 0.18
+
+    writer.add_frame = slow_first_frame
+    first = replace(Source().capture(), metadata={'recording_mode': 'joint', 'quality': {
+        'base_timestamp': 9.99, 'wrist_timestamp': 9.99, 'roi_timestamp': 9.99,
+    }})
+    session = RecordingSession(
+        type('Samples', (), {'capture': lambda _: replace(first, timestamp=clock[0])})(),
+        lambda: writer, event_callback=lambda *a: None, image_size=(2, 2),
+    )
+    session._writer = writer
+    session._recording_mode = 'joint'
+
+    class StopAfterTwoWaits:
+        waits = 0
+        def is_set(self):
+            return self.waits >= 2
+        def wait(self, timeout):
+            self.waits += 1
+            clock[0] += timeout
+
+    session._episode_stop = StopAfterTwoWaits()
+    session._record_loop(first)
+    quality = session.snapshot()['quality']
+    assert quality['frames'] == 2
+    assert quality['effective_fps'] == pytest.approx(5.0)
+    assert quality['late_frames'] == 1
+    assert quality['reused_camera_frames'] == {'base': 1, 'wrist': 1, 'roi': 1}
+    assert quality['skipped_samples'] == 3
+    assert quality['dropped_frames'] is None
+
+
+def test_sampling_uses_slot_when_previous_ack_finishes_on_its_deadline(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr('gello_cr.recording.session.time.monotonic', lambda: clock[0])
+    writer = Writer()
+    original_add = writer.add_frame
+
+    def slow_first_frame(frame):
+        original_add(frame)
+        if len(writer.calls) == 1:
+            clock[0] += 0.75
+
+    writer.add_frame = slow_first_frame
+    session = RecordingSession(
+        Source(), lambda: writer, event_callback=lambda *a: None, fps=4, image_size=(2, 2),
+    )
+    session._writer = writer
+    session._recording_mode = 'joint'
+
+    class StopAfterTwoFrames:
+        def is_set(self):
+            return len(writer.calls) >= 2
+
+        def wait(self, timeout):
+            clock[0] += timeout
+
+    session._episode_stop = StopAfterTwoFrames()
+    session._record_loop(Source().capture())
+    assert [call[1].timestamp for call in writer.calls] == [10.0, 10.75]
+    assert session.snapshot()['quality']['skipped_samples'] == 2
+
+
+@pytest.mark.parametrize('operation', ['allocate', 'checkpoint'])
+def test_batch_snapshot_does_not_wait_for_manifest_fsync(tmp_path, monkeypatch, operation):
+    from gello_cr.recording.manifest import BatchManifest, SegmentManifest
+
+    manager = make_manager(tmp_path)
+    manager.create_dataset('capture', tmp_path / 'train')
+    manager._stop_heartbeat()
+    manifest_type = BatchManifest if operation == 'allocate' else SegmentManifest
+    original_save = manifest_type.save
+    entered, release, snapshot_ready = threading.Event(), threading.Event(), threading.Event()
+
+    def blocked_save(manifest, root):
+        entered.set()
+        assert release.wait(3)
+        return original_save(manifest, root)
+
+    monkeypatch.setattr(manifest_type, 'save', blocked_save)
+    action = manager._allocate_episode if operation == 'allocate' else manager._checkpoint
+    io_thread = threading.Thread(target=action)
+    read_thread = threading.Thread(target=lambda: (manager.snapshot(), snapshot_ready.set()))
+    try:
+        io_thread.start()
+        assert entered.wait(1)
+        read_thread.start()
+        assert snapshot_ready.wait(0.3), 'snapshot waited for manifest persistence'
+    finally:
+        release.set()
+        io_thread.join(3)
+        read_thread.join(3)
+        manager.close()
 
 
 def test_configured_hd_frame_survives_journal_roundtrip(tmp_path):

@@ -9,6 +9,7 @@ from gello_cr.app.runtime_bindings import (
 from gello_cr.app.service import ApplicationService
 from gello_cr.core.state_machine import (
     Command,
+    InvalidTransition,
     WorkflowState,
     RecordingState,
     WorkflowStateMachine,
@@ -41,13 +42,13 @@ def test_home_completion_cannot_clear_a_new_stop_or_active_motion(runtime_state)
     teleop = FakeTeleop()
     teleop.state = runtime_state
     RuntimeCommandBindings(service, teleop_engine=teleop, recorder=FakeRecorder()).install()
-    with pytest.raises(RuntimeError, match="HOME 完成状态"):
+    with pytest.raises(InvalidTransition):
         service.dispatch(Command.HOME_COMPLETED)
     assert service.state is WorkflowState.ESTOP
 
 
 def test_home_completion_keeps_pending_data_and_never_restarts_follow():
-    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.TELEOP_RUNNING))
+    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.RETURNING_HOME))
     teleop = FakeTeleop()
     teleop.state = "idle"
     recorder = FakeRecorder()
@@ -216,7 +217,7 @@ def test_start_episode_forwards_task_root_and_metadata() -> None:
             "start_episode",
             "Pick motor",
             "/data/run",
-            {"operator": "test"},
+            {"operator": "test", "recording_source": "teleop"},
         )
     ]
     assert service.state is WorkflowState.TELEOP_RUNNING

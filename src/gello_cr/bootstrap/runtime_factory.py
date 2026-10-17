@@ -8,6 +8,8 @@ power_on(), start_follow(), camera start, or recorder start_episode().
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +112,80 @@ class Cr3aLifecycle:
         # Tracks the application's requested robot power state.
         # A fault/reset from CONNECTED must never enable the robot.
         self._desired_enabled = False
+        self._status_lock = threading.Lock()
+        self._feedback_io_lock = threading.RLock()
+        self._feedback_stop = threading.Event()
+        self._feedback_thread: threading.Thread | None = None
+        self._status = {
+            "connected": False,
+            "servo_state": "unknown",
+            "sampled_at": None,
+            "desired_enabled": False,
+            "error": "",
+        }
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Read the last worker observation; never call the SDK from GUI polls."""
+        with self._status_lock:
+            return dict(self._status)
+
+    def _refresh_status(self) -> None:
+        with self._feedback_io_lock:
+            session, device = self.session, self.device
+            connected = False
+            servo, error = "unknown", ""
+            if session is not None and device is not None:
+                try:
+                    connected = bool(device.connected)
+                    if connected:
+                        state = int(session.servo_state())
+                        servo = {0: "off", 1: "off", 2: "error", 3: "on"}.get(state, "unknown")
+                        if state == 2:
+                            error = "CR3A Servo 报警，servo_state=2"
+                    else:
+                        error = "CR3A 连接反馈已断开"
+                except Exception as exc:
+                    servo, error = "error", f"{type(exc).__name__}: {exc}"
+            with self._status_lock:
+                self._status = {
+                    "connected": connected,
+                    "servo_state": servo,
+                    "sampled_at": time.monotonic(),
+                    "desired_enabled": self._desired_enabled,
+                    "error": error,
+                }
+            if session is not None and not connected:
+                # Unexpected loss keeps the runtime fault latch. Planned
+                # disconnect stops this producer before detaching the session.
+                try:
+                    self._teleop_engine.detach_robot(session, error or "CR3A 连接反馈已断开")
+                except Exception as exc:
+                    self._event("error", f"CR3A 断线停止失败: {exc}")
+
+    def _feedback_loop(self) -> None:
+        while not self._feedback_stop.wait(0.25):
+            self._refresh_status()
+
+    def _start_feedback(self) -> None:
+        if self._feedback_thread is not None and self._feedback_thread.is_alive():
+            return
+        self._feedback_stop.clear()
+        self._feedback_thread = threading.Thread(
+            target=self._feedback_loop,
+            name="CR3A-Feedback",
+            daemon=True,
+        )
+        self._feedback_thread.start()
+
+    def stop_feedback(self, timeout: float = 0.5) -> None:
+        """Bounded join; retain resources for retry if an SDK read is stuck."""
+        self._feedback_stop.set()
+        thread = self._feedback_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                raise TimeoutError("CR3A 反馈线程未及时停止；保留连接供重试关闭")
+        self._feedback_thread = None
 
     def _event(self, level: str, message: str) -> None:
         if self._event_callback is not None:
@@ -158,6 +234,9 @@ class Cr3aLifecycle:
 
         self.device = device
         self.session = session
+        self._desired_enabled = False
+        self._refresh_status()
+        self._start_feedback()
         self._event("info", "CR3A 已连接；未上使能，未启动 ServoJ")
         return session
 
@@ -168,23 +247,31 @@ class Cr3aLifecycle:
         return session
 
     def power_on(self) -> Any:
-        session = self._require_session()
-        transition = session.power_on()
-        state = int(session.servo_state())
-        if state != 3:
-            raise RuntimeError(f"CR3A 上使能确认失败，servo_state={state}")
-        self._desired_enabled = True
-        return transition
+        with self._feedback_io_lock:
+            session = self._require_session()
+            try:
+                transition = session.power_on()
+                state = int(session.servo_state())
+                if state != 3:
+                    raise RuntimeError(f"CR3A 上使能确认失败，servo_state={state}")
+                self._desired_enabled = True
+                return transition
+            finally:
+                self._refresh_status()
 
     def power_off(self) -> Any:
-        session = self._require_session()
-        self._teleop_engine.emergency_stop("下使能前停止当前动作")
-        transition = session.power_off()
-        state = int(session.servo_state())
-        if state not in (0, 1):
-            raise RuntimeError(f"CR3A 下使能确认失败，servo_state={state}")
-        self._desired_enabled = False
-        return transition
+        with self._feedback_io_lock:
+            session = self._require_session()
+            try:
+                self._teleop_engine.stop_motion("下使能前停止当前动作")
+                transition = session.power_off()
+                state = int(session.servo_state())
+                if state not in (0, 1):
+                    raise RuntimeError(f"CR3A 下使能确认失败，servo_state={state}")
+                self._desired_enabled = False
+                return transition
+            finally:
+                self._refresh_status()
 
     def _reset(self, label: str) -> Any:
         session = self._require_session()
@@ -213,6 +300,7 @@ class Cr3aLifecycle:
             message = f"{label}完成；保持未使能状态，不自动恢复跟随"
 
         self._event("info", message)
+        self._refresh_status()
         return transition
 
     def reset_fault(self) -> Any:
@@ -230,24 +318,39 @@ class Cr3aLifecycle:
             self._desired_enabled = False
 
     def disconnect(self) -> bool:
+        self.stop_feedback()
         device = self.device
         session = self.session
         errors = []
         if session is not None:
             try:
-                self._teleop_engine.detach_robot(session, "ApplicationService 断开 CR3A")
+                self._teleop_engine.detach_robot(
+                    session,
+                    "ApplicationService 断开 CR3A",
+                    expected=True,
+                )
             except Exception as exc:
                 errors.append(exc)
-        if device is not None:
+        if device is not None and not errors:
             try:
                 device.close()
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            raise ExceptionGroup("CR3A disconnect incomplete", errors)
+            failure = ExceptionGroup("CR3A disconnect incomplete", errors)
+            if self.device is not None and self.session is not None:
+                try:
+                    # Teardown stopped the previous sampler before touching
+                    # the session. Retained resources still need fresh status
+                    # while the operator resolves the error and retries.
+                    self._start_feedback()
+                except Exception as feedback_error:
+                    failure.add_note(f"CR3A feedback restart failed: {feedback_error}")
+            raise failure
         self.device = None
         self.session = None
         self._desired_enabled = False
+        self._refresh_status()
         self._event("info", "CR3A 已断开；不会自动重连")
         return True
 
@@ -287,6 +390,7 @@ class ConcreteRuntime:
         """Drain motion before releasing devices; failed cleanup can be retried."""
         errors = []
         steps = [
+            ("robot_feedback", self.cr3a_lifecycle.stop_feedback),
             ("motion", lambda: self.teleop_engine.shutdown(close_devices=False)),
             *(
                 (name, lambda device=device: device.close(hold=False))
@@ -309,7 +413,7 @@ class ConcreteRuntime:
             except Exception as exc:
                 exc.add_note(f"shutdown resource: {name}")
                 errors.append(exc)
-                if name == "motion":
+                if name in ("motion", "robot_feedback"):
                     break
             else:
                 self._closed_resources.add(name)

@@ -1,16 +1,10 @@
 """Recovery decisions over application commands; no filesystem or SDK access."""
 
-from PySide6.QtWidgets import (
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QMessageBox, QWidget
 
 from gello_cr.core.state_machine import Command
+
+from .generated.ui_recovery_panel import Ui_RecoveryPanel
 
 
 class RecoveryPanel(QWidget):
@@ -21,57 +15,31 @@ class RecoveryPanel(QWidget):
         self._signature = None
         self._partial_signature = None
         self._busy = False
-        layout = QVBoxLayout(self)
-        self.batches = QComboBox()
+        self._ui = Ui_RecoveryPanel()
+        self._ui.setupUi(self)
+        self.batches = self._ui.recovery_batches
+        self.summary = self._ui.recovery_summary
+        self.refresh_button = self._ui.recovery_refresh_button
+        self.resume_button = self._ui.recovery_resume_button
+        self.finalize_button = self._ui.recovery_finalize_button
+        self.discard_button = self._ui.recovery_discard_button
+        self.partials = self._ui.recovery_partials
+        self.failure_button = self._ui.recovery_failure_button
+        self.discard_partial_button = self._ui.recovery_discard_partial_button
+        self.suspend_button = self._ui.recovery_suspend_button
+        self.discard_current_button = self._ui.recovery_discard_current_button
         self.batches.currentIndexChanged.connect(self._details)
-        layout.addWidget(self.batches)
-        self.summary = QLabel("没有未完成批次")
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
-        row = QHBoxLayout()
-        self.refresh_button = QPushButton("刷新未完成批次")
-        self.resume_button = QPushButton("继续采集（新分段）")
-        self.finalize_button = QPushButton("结束并合并")
-        self.discard_button = QPushButton("丢弃所选批次")
-        for button in (
-            self.refresh_button,
-            self.resume_button,
-            self.finalize_button,
-            self.discard_button,
-        ):
-            row.addWidget(button)
-        layout.addLayout(row)
+        self.partials.currentIndexChanged.connect(self._partial_buttons)
         self.refresh_button.clicked.connect(lambda: self.submit(Command.SCAN_RECOVERABLE_BATCHES))
         self.resume_button.clicked.connect(lambda: self._batch_command(Command.RESUME_BATCH))
         self.finalize_button.clicked.connect(lambda: self._batch_command(Command.FINALIZE_BATCH))
         self.discard_button.clicked.connect(lambda: self._discard(self._selected_id()))
-        partial_row = QHBoxLayout()
-        self.partials = QComboBox()
-        self.partials.currentIndexChanged.connect(self._partial_buttons)
-        self.failure_button = QPushButton("Partial 保留为 Failure")
-        self.discard_partial_button = QPushButton("丢弃 Partial")
-        partial_row.addWidget(self.partials, 1)
-        partial_row.addWidget(self.failure_button)
-        partial_row.addWidget(self.discard_partial_button)
-        layout.addLayout(partial_row)
         self.failure_button.clicked.connect(lambda: self._resolve("failure"))
         self.discard_partial_button.clicked.connect(lambda: self._resolve("discard"))
-        current_row = QHBoxLayout()
-        self.suspend_button = QPushButton("保留当前批次，稍后继续")
-        self.discard_current_button = QPushButton("丢弃当前批次")
-        current_row.addWidget(self.suspend_button)
-        current_row.addWidget(self.discard_current_button)
-        layout.addLayout(current_row)
         self.suspend_button.clicked.connect(self._suspend)
         self.discard_current_button.clicked.connect(
             lambda: self._discard(self.snapshot.get("batch_id"))
         )
-        note = QLabel(
-            "恢复前请先选择原保存格式并保持采样配置一致。"
-            "合并后保留原分段；丢弃仅作标记，保留 staging 文件。"
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
 
     def _selected(self):
         return self.batches.currentData() or {}

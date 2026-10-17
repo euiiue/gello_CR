@@ -308,3 +308,43 @@ def test_command_and_preemption_are_serialized_across_threads():
     assert robot.calls[0][0] == "servo"
     assert robot.calls[1] == ("stop",)
     assert owners[0].active
+
+
+def test_status_snapshot_does_not_wait_for_sdk_send_and_stop_still_revokes_lease():
+    robot, coordinator = setup_motion()
+    entered, release, read = threading.Event(), threading.Event(), threading.Event()
+    original = robot.send_servoj
+
+    def send(value):
+        entered.set()
+        assert release.wait(2)
+        return original(value)
+
+    robot.send_servoj = send
+    lease = coordinator.acquire(MotionSource.TELEOP)
+    sender = threading.Thread(target=lambda: lease.servo_joint(target()))
+    sender.start()
+    assert entered.wait(1)
+    snapshots = []
+
+    def snapshot():
+        snapshots.append(coordinator.status)
+        read.set()
+
+    reader = threading.Thread(target=snapshot)
+    stopper = threading.Thread(target=lambda: coordinator.cancel_all("operator stop"))
+    reader.start()
+    stopper.start()
+    try:
+        assert read.wait(0.2), "GUI status waited for SDK send"
+        assert snapshots[0].source is MotionSource.TELEOP
+    finally:
+        release.set()
+        sender.join(2)
+        reader.join(2)
+        stopper.join(2)
+    assert not lease.active
+    assert coordinator.status.source is None
+    assert robot.calls[-1] == ("stop",)
+    with pytest.raises(MotionPreempted):
+        lease.servo_joint(target())

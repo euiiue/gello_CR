@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from gello_cr.app.settings import OperatorSettings
 from gello_cr.app.config_store import TeleopConfigStore
+from gello_cr.app.settings import OperatorSettings
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,7 +128,10 @@ def test_camera_window_selection_round_trips_and_preserves_unselected_settings(d
     name, serial, mode, roi = widget.camera_editors[2]
     name.setText("操作区特写")
     serial.setEditText("new-camera")
+    mode.setCurrentIndex(mode.findData("camera"))
+    assert not any(edit.isEnabled() for edit in roi)
     mode.setCurrentIndex(mode.findData("roi"))
+    assert all(edit.isEnabled() for edit in roi)
     for edit, value in zip(roi, (0.1, 0.2, 0.8, 0.9), strict=True):
         edit.setText(str(value))
     widget._show_cameras([{"serial": "new-camera", "name": "D435"}], "")
@@ -237,7 +240,6 @@ def test_saving_new_session_reads_parameters_without_hardware(settings):
 
 def test_header_settings_save_requires_restart_and_emits_no_commands(settings):
     pytest.importorskip("PySide6")
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
     from gello_cr.app import ApplicationService

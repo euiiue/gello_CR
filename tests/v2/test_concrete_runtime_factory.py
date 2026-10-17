@@ -231,6 +231,7 @@ def test_runtime_keeps_devices_open_until_motion_producers_stop():
         teleop_engine=SimpleNamespace(shutdown=stop_motion), sample_source=None,
         recorder=None, camera_devices={},
         cr3a_lifecycle=SimpleNamespace(
+            stop_feedback=lambda: None,
             shutdown_power=lambda: closed.append("power"),
             disconnect=lambda: closed.append("connection")),
     )

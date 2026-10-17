@@ -130,8 +130,10 @@ class MotionCoordinator:
 
     @property
     def status(self) -> MotionStatus:
-        with self._lock:
-            return self._status
+        # Writers replace this frozen value while holding the ownership lock.
+        # Reading the published reference needs no SDK lock and cannot expose
+        # a partially updated status. Lease validation and sends stay atomic.
+        return self._status
 
     @property
     def current_owner(self) -> MotionSource | None:

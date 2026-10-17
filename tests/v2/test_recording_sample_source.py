@@ -98,11 +98,11 @@ def test_third_camera_has_independent_freshness_skew_and_preview_timestamp(monke
     source.update_wrist(object(), 100.0)
     source.update_stream(2, object(), 98.0)
     assert '第三路' in source.readiness_error()
-    sample = source.capture()
-    assert sample.metadata['quality']['roi_age_exceeded'] == 1
-    assert sample.metadata['quality']['camera_skew_s'] == 2
+    with pytest.raises(RuntimeError, match='第三路.*过期'):
+        source.capture()
     source.update_stream(2, object(), 99.8)
     assert '不同步' in source.readiness_error()
+    assert source.capture().metadata['quality']['camera_skew_exceeded'] == 1
     source.update_stream(2, object(), 100.0)
     assert source.snapshot_ready()
     assert source.preview_snapshot()['roi_timestamp'] == 100.0

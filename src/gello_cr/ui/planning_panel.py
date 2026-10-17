@@ -4,21 +4,11 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QWidget,
-)
+from PySide6.QtWidgets import QTableWidgetItem, QWidget
 
 from gello_cr.core.state_machine import Command, WorkflowState
+
+from .generated.ui_planning_page import Ui_PlanningPanel
 
 
 class PlanningPanel(QWidget):
@@ -34,93 +24,49 @@ class PlanningPanel(QWidget):
         self._position_serial = 0
         self._add_current_pending = False
         self._configured = False
-        layout = QGridLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        self.setStyleSheet("QPushButton { min-height: 22px; padding: 2px 8px; }")
-        self.mode_combo = QComboBox()
-        for text, key in [
-            ("Joint PTP", "joint"),
-            ("TCP PTP", "tcp_ptp"),
-            ("TCP Linear", "tcp_linear"),
-            ("Waypoints", "waypoints"),
-        ]:
-            self.mode_combo.addItem(text, key)
-        self.name_edit = QLineEdit("Planned motion")
-        self.speed_spin = QDoubleSpinBox()
-        self.speed_spin.setRange(1, 100)
-        self.speed_spin.setValue(30)
-        self.speed_spin.setSuffix(" %")
-        header = QHBoxLayout()
-        for widget in (
-            QLabel("模式"),
-            self.mode_combo,
-            QLabel("名称"),
-            self.name_edit,
-            QLabel("速度"),
-            self.speed_spin,
-        ):
-            header.addWidget(widget)
-        layout.addLayout(header, 0, 0, 1, 2)
-        self.offline_start = QLineEdit("0, 0, 0, 0, 0, 0")
-        self.offline_start.setToolTip("离线规划起点 J1–J6，逗号分隔，单位 °；连接后需重新规划。")
-        self.offline_start.textChanged.connect(self._changed)
-        layout.addWidget(self.offline_start, 6, 0, 1, 2)
-        target = QHBoxLayout()
-        self.target_spins, self.target_labels = [], []
-        for i in range(6):
-            label = QLabel(f"J{i + 1} °")
-            spin = QDoubleSpinBox()
-            spin.setRange(-100000, 100000)
-            spin.setDecimals(3)
-            spin.valueChanged.connect(self._changed)
-            self.target_labels.append(label)
-            self.target_spins.append(spin)
-            target.addWidget(label)
-            target.addWidget(spin)
-        layout.addLayout(target, 1, 0, 1, 2)
-        self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            ["X mm", "Y mm", "Z mm", "Rx °", "Ry °", "Rz °", "Mode", "速度 %", "停留 s"]
-        )
-        self.table.setMaximumHeight(170)
-        self.table.setMinimumHeight(110)
+        self._ui = Ui_PlanningPanel()
+        self._ui.setupUi(self)
+        self.mode_combo = self._ui.planning_mode_combo
+        self.name_edit = self._ui.planning_name_edit
+        self.speed_spin = self._ui.planning_speed_spin
+        self.offline_start = self._ui.planning_offline_start
+        self.target_spins = [
+            self._ui.planning_target_spins_0,
+            self._ui.planning_target_spins_1,
+            self._ui.planning_target_spins_2,
+            self._ui.planning_target_spins_3,
+            self._ui.planning_target_spins_4,
+            self._ui.planning_target_spins_5,
+        ]
+        self.target_labels = [
+            self._ui.planning_target_labels_0,
+            self._ui.planning_target_labels_1,
+            self._ui.planning_target_labels_2,
+            self._ui.planning_target_labels_3,
+            self._ui.planning_target_labels_4,
+            self._ui.planning_target_labels_5,
+        ]
+        self.table = self._ui.planning_table
+        self.read_button = self._ui.planning_read_button
+        self.add_current_button = self._ui.planning_add_current_button
+        self.add_button = self._ui.planning_add_button
+        self.delete_button = self._ui.planning_delete_button
+        self.up_button = self._ui.planning_up_button
+        self.down_button = self._ui.planning_down_button
+        self.plan_button = self._ui.planning_plan_button
+        self.execute_button = self._ui.planning_execute_button
+        self.save_button = self._ui.planning_save_button
+        self.status_label = self._ui.planning_status_label
+        self.preview_text = self._ui.planning_preview_text
+        self._ui.planning_mode_combo.setItemData(0, "joint")
+        self._ui.planning_mode_combo.setItemData(1, "tcp_ptp")
+        self._ui.planning_mode_combo.setItemData(2, "tcp_linear")
+        self._ui.planning_mode_combo.setItemData(3, "waypoints")
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemChanged.connect(self._changed)
-        layout.addWidget(self.table, 2, 0, 1, 2)
-        editor = QHBoxLayout()
-        self.read_button = QPushButton("读取当前位置")
-        self.add_current_button = QPushButton("添加当前位置")
-        self.add_button = QPushButton("添加 Waypoint")
-        self.delete_button = QPushButton("删除")
-        self.up_button = QPushButton("上移")
-        self.down_button = QPushButton("下移")
-        for widget in (
-            self.read_button,
-            self.add_current_button,
-            self.add_button,
-            self.delete_button,
-            self.up_button,
-            self.down_button,
-        ):
-            editor.addWidget(widget)
-        layout.addLayout(editor, 3, 0, 1, 2)
-        actions = QHBoxLayout()
-        self.plan_button = QPushButton("规划 / 预览")
-        self.execute_button = QPushButton("执行")
-        self.save_button = QPushButton("保存到轨迹库")
-        self.status_label = QLabel("IDLE")
-        for widget in (
-            self.plan_button,
-            self.execute_button,
-            self.save_button,
-            self.status_label,
-        ):
-            actions.addWidget(widget)
-        layout.addLayout(actions, 4, 0, 1, 2)
-        self.preview_text = QPlainTextEdit()
-        self.preview_text.setReadOnly(True)
-        self.preview_text.setMinimumHeight(150)
-        layout.addWidget(self.preview_text, 5, 0, 1, 2)
+        self.offline_start.textChanged.connect(self._changed)
+        for spin in self.target_spins:
+            spin.valueChanged.connect(self._changed)
         self.read_button.clicked.connect(lambda: self._read(False))
         self.add_current_button.clicked.connect(lambda: self._read(True))
         self.add_button.clicked.connect(self._add)

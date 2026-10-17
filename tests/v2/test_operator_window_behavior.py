@@ -1,14 +1,16 @@
 """Qt behavior tests; offscreen window, injected backend, no device constructors."""
 import os
+
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 import pytest
+
 pytest.importorskip('PySide6')
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from gello_cr.app import ApplicationService
-from gello_cr.core.state_machine import Command, WorkflowState, WorkflowStateMachine
+from gello_cr.core.state_machine import Command
 from gello_cr.ui.command_port import CallbackCommandPort
 from gello_cr.ui.main_window import OperatorMainWindow
 from gello_cr.ui.presenter import OperatorUiPresenter
@@ -92,9 +94,11 @@ def test_recovery_panel_submits_explicit_partial_and_resume_decisions(window):
     }]
     widget.refresh_from_presenter()
     panel = widget.dataset_page.recovery
-    assert widget.pages.currentWidget().widget() is widget.collection
+    assert widget.navigation.currentRow() == 0
+    assert widget.collection.isVisible()
     widget.recovery_button.click()
-    assert widget.pages.currentWidget().widget() is widget.dataset_page
+    assert widget.navigation.currentRow() == 3
+    assert widget.dataset_page.isVisible()
     panel.failure_button.click()
     assert requests[-1].command is Command.RESOLVE_PARTIAL_EPISODE
     assert dict(requests[-1].payload) == {
@@ -105,21 +109,25 @@ def test_recovery_panel_submits_explicit_partial_and_resume_decisions(window):
     assert requests[-1].payload['batch_id'] == 'batch-test'
 
 
-def test_third_preview_refreshes_without_a_new_base_or_wrist_frame(window, monkeypatch):
+def test_third_preview_refreshes_without_a_new_base_or_wrist_frame(window):
+    import numpy as np
+
     from gello_cr.ui.preview_model import CameraPreview
 
     widget, _, _, _ = window
-    rendered = []
-    monkeypatch.setattr(widget, '_set_preview_image', lambda label, image, text: rendered.append(image))
-    widget.render_preview(CameraPreview(base_timestamp=1, wrist_timestamp=1, roi_timestamp=1))
-    rendered.clear()
-    image = object()
+    label = widget.collection.roi_preview
     widget.render_preview(CameraPreview(
-        base_timestamp=1, wrist_timestamp=1, roi_timestamp=2, roi_rgb=image,
+        base_timestamp=1, wrist_timestamp=1, roi_timestamp=1,
+        roi_rgb=np.zeros((8, 16, 3), dtype=np.uint8),
+    ))
+    assert label.pixmap().width() > label.pixmap().height()
+    widget.render_preview(CameraPreview(
+        base_timestamp=1, wrist_timestamp=1, roi_timestamp=2,
+        roi_rgb=np.zeros((16, 8, 3), dtype=np.uint8),
         stream_names=('Front', 'Wrist', 'Side camera'),
         stream_descriptions=('a', 'b', 'c'),
     ))
-    assert rendered[-1] is image
+    assert label.pixmap().height() > label.pixmap().width()
     assert widget.collection.preview_titles[2].text() == 'Side camera'
     assert widget.collection.preview_titles[2].toolTip() == 'c'
 
@@ -168,21 +176,21 @@ def test_episode_start_recovers_after_camera_frames_resume(window, saved):
     widget._presenter._readiness_snapshot = lambda: readiness
     recorder.update(saved_episodes=saved, session_active=True)
     widget.refresh_from_presenter()
-    assert '腕部相机帧过期' in widget.collection.episode_status.text()
+    assert '腕部相机帧过期' in widget.collection.camera_hint.text()
 
     service.dispatch(Command.START_TELEOP)
     widget.refresh_from_presenter()
     assert not widget.collection.episode_start_button.isEnabled()
-    assert '腕部相机帧过期' in widget.collection.episode_status.text()
-    assert '请先启动主从跟随' not in widget.collection.episode_status.text()
+    assert '腕部相机帧过期' in widget.collection.camera_hint.text()
+    assert '请先启动主从跟随' not in widget.collection.episode_hint.text()
     assert widget.collection.stop_cameras_button.isEnabled()
 
     readiness.update(camera_frames_ready=True, camera_error='')
     widget.refresh_from_presenter()
     assert widget.collection.episode_start_button.isEnabled()
-    assert 'Cameras READY' in widget.summary_status.text()
-    assert '暂不能开始' not in widget.collection.episode_status.text()
-    assert f'Episodes {saved}' in widget.collection.episode_status.text()
+    assert widget.collection.camera_hint.property('state') == 'success'
+    assert '暂不能开始' not in widget.collection.episode_hint.text()
+    assert widget.collection.saved_metric.text() == str(saved)
     widget.collection.episode_start_button.click()
     assert [r.command for r in requests] == [Command.START_EPISODE]
 
@@ -234,6 +242,7 @@ def test_dagger_start_requires_fresh_devices_and_submits_selected_fields(window)
     widget._presenter._readiness_snapshot = lambda: {
         'master_connected': True, 'o6_connected': True,
         'cameras_running': True, 'camera_frames_ready': True,
+        'robot_connected': True, 'servo_state': 'on',
     }
     widget.collection.dagger_host.setText('192.168.2.11')
     widget.collection.dagger_root.setText('/tmp/expert sessions')

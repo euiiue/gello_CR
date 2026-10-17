@@ -186,15 +186,37 @@ def test_estop_during_execution_cannot_be_overwritten_by_completion(setup):
     assert engine.motion.current_owner is None
 
 
-def test_return_home_drains_point_producer_and_preserves_home_state(setup):
+def test_home_requires_explicit_point_stop_and_preserves_home_lease(setup):
     engine, service, _, _ = setup
     engine.store.data["presets"]["HOME"] = {"robot_joints_deg": [0] * 7}
     engine.o6.connected = False
     plan_id = plan(service, target=[0.1] * 6)
     service.dispatch(Command.EXECUTE_PLAN, {"plan_id": plan_id})
     wait_for(lambda: bool(engine.robot.servoj_targets))
-    engine.return_home(lambda: None)
+    producer = engine.point_motion.thread
+    point_lease = engine.point_motion._lease
+    with pytest.raises(RuntimeError, match="idle"):
+        engine.return_home()
+    assert producer.is_alive() and engine.point_motion.thread is producer
+    assert point_lease.active
+    assert engine.motion.current_owner is MotionSource.POINT_MOVE
+    assert engine.state == "point_move"
+    assert engine.robot.movej_targets == []
+    service.dispatch(Command.STOP_POINT_MOTION)
     assert not engine.point_motion.running
+    assert not point_lease.active
     assert engine.state == "idle"
-    assert engine.point_motion.snapshot()["status"] == "PREEMPTED"
+    assert engine.point_motion.snapshot()["status"] == "STOPPED"
+    original_movej = engine.robot.movej
+
+    def home_movej(*args):
+        assert not producer.is_alive()
+        assert engine.state == "preset"
+        assert engine.motion.current_owner is MotionSource.HOME
+        original_movej(*args)
+
+    engine.robot.movej = home_movej
+    engine.return_home()
+    assert engine.state == "idle"
+    assert engine.motion.current_owner is None
     assert engine.robot.movej_targets[-1] == [0] * 7

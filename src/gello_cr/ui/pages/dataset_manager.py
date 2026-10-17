@@ -1,19 +1,10 @@
 """Dataset browsing/validation and P6 recovery, through application commands."""
 
-from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QTableWidgetItem, QWidget
 
 from gello_cr.core.state_machine import Command
 
+from ..generated.ui_dataset_manager_page import Ui_DatasetManagerPage
 from ..recovery_panel import RecoveryPanel
 
 
@@ -23,36 +14,17 @@ class DatasetManagerPage(QWidget):
         self.submit = submit
         self._signature = None
         self._busy = False
-        layout = QVBoxLayout(self)
-        row = QHBoxLayout()
-        self.root_edit = QLineEdit()
-        self.scan_button = QPushButton("扫描数据集")
-        self.validate_button = QPushButton("校验所选数据集")
-        for widget in (
-            QLabel("数据集目录"),
-            self.root_edit,
-            self.scan_button,
-            self.validate_button,
-        ):
-            row.addWidget(widget)
-        layout.addLayout(row)
-        self.active_label = QLabel()
-        layout.addWidget(self.active_label)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["Task / Dataset", "Format", "Episodes", "Frames", "Created At", "Status"]
-        )
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._ui = Ui_DatasetManagerPage()
+        self._ui.setupUi(self)
+        self.root_edit = self._ui.dataset_root_edit
+        self.scan_button = self._ui.dataset_scan_button
+        self.validate_button = self._ui.dataset_validate_button
+        self.active_label = self._ui.dataset_active_label
+        self.table = self._ui.dataset_table
+        self.details = self._ui.dataset_details
         self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
-        self.details = QPlainTextEdit()
-        self.details.setReadOnly(True)
-        self.details.setMaximumHeight(115)
-        layout.addWidget(self.details)
-        layout.addWidget(QLabel("未完成批次与 Partial Episode"))
-        self.recovery = RecoveryPanel(submit)
-        layout.addWidget(self.recovery)
+        self.recovery = RecoveryPanel(submit, self._ui.dataset_recovery)
+        self._ui.dataset_recovery_layout.addWidget(self.recovery)
         self.scan_button.clicked.connect(
             lambda: submit(Command.LIST_DATASETS, {"root": self.root_edit.text().strip()})
         )

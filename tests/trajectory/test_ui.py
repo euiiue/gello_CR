@@ -34,7 +34,12 @@ def trajectory_window():
         service,
         runtime_snapshot=lambda: snapshot,
         recorder_snapshot=lambda: {},
-        readiness_snapshot=lambda: {"o6_connected": True},
+        readiness_snapshot=lambda: {
+            "o6_connected": True,
+            "robot_connected": True,
+            "servo_state": "on",
+            "capabilities": {"supports_joint_control": True},
+        },
     )
     widget = OperatorMainWindow(presenter, CallbackCommandPort(requests.append))
     yield widget, snapshot, requests, service

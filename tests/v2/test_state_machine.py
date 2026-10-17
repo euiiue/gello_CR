@@ -25,10 +25,11 @@ def test_normal_collection_workflow() -> None:
     assert workflow.apply(Command.DISCARD_EPISODE) is WorkflowState.TELEOP_RUNNING
 
 
-def test_recording_can_start_with_enabled_robot_without_changing_motion():
+def test_recording_requires_a_running_source():
     workflow = WorkflowStateMachine(WorkflowState.ROBOT_ENABLED)
-    assert workflow.apply(Command.START_EPISODE) is WorkflowState.ROBOT_ENABLED
-    assert workflow.recording_state is RecordingState.RECORDING
+    with pytest.raises(InvalidTransition):
+        workflow.apply(Command.START_EPISODE)
+    assert workflow.recording_state is RecordingState.IDLE
 
 
 def test_estop_from_recording_never_auto_resumes_motion() -> None:
@@ -51,13 +52,17 @@ def test_disconnect_is_rejected_while_recording() -> None:
         workflow.apply(Command.DISCONNECT)
 
 
-def test_home_then_save_success_stays_robot_enabled() -> None:
-    # HOME interrupts a recording but keeps the buffered Episode pending save.
+def test_home_requires_episode_resolution_and_explicit_teleop_stop() -> None:
     workflow = WorkflowStateMachine(WorkflowState.TELEOP_RUNNING, recording_state=RecordingState.RECORDING)
+    assert not workflow.can(Command.RETURN_HOME)
+    workflow.apply(Command.STOP_EPISODE)
+    assert not workflow.can(Command.RETURN_HOME)
+    workflow.apply(Command.SAVE_SUCCESS)
+    assert not workflow.can(Command.RETURN_HOME)
+    workflow.apply(Command.STOP_TELEOP)
     assert workflow.apply(Command.RETURN_HOME) is WorkflowState.RETURNING_HOME
     assert workflow.apply(Command.HOME_COMPLETED) is WorkflowState.ROBOT_ENABLED
-    workflow.apply(Command.STOP_EPISODE)
-    assert workflow.apply(Command.SAVE_SUCCESS) is WorkflowState.ROBOT_ENABLED
+    assert workflow.recording_state is RecordingState.IDLE
 
 
 def test_save_success_from_robot_enabled_is_not_a_full_collection_transition() -> None:

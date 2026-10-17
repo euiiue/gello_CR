@@ -125,12 +125,20 @@ class CameraPollingService:
                 for serial, camera in self._cameras.items():
                     if camera.error:
                         raise RuntimeError(f"{serial}: {camera.error}")
+                    if not camera.connected:
+                        raise RuntimeError(f"{serial}: camera disconnected")
                     frame = camera.latest()
                     if frame is not None and frame.timestamp != last.get(serial):
                         self._publish(serial, frame)
                         last[serial] = frame.timestamp
                 self._stop.wait(self._period_s)
         except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            invalidate = getattr(self._sample_source, "invalidate_streams", None)
+            if callable(invalidate):
+                invalidate(message)
+            else:
+                self._sample_source.clear_streams()
             with self._lock:
-                self._error = f"{type(exc).__name__}: {exc}"
+                self._error = message
             self._stop.set()

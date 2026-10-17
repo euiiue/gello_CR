@@ -156,7 +156,7 @@ def test_runtime_cleanup_preserves_devices_after_stop_failure():
         return SimpleNamespace(close=lambda **kw: calls.append(name))
     runtime = ConcreteRuntime(None, None, device('roarm'), device('inverse3'), device('gello'),
         None, device('o6'), SimpleNamespace(shutdown=broken_stop), None, None, {},
-        SimpleNamespace(shutdown_power=lambda: calls.append('power'),
+        SimpleNamespace(stop_feedback=lambda: None, shutdown_power=lambda: calls.append('power'),
                         disconnect=lambda: calls.append('disconnect')))
     with pytest.raises(ExceptionGroup):
         runtime.close()
@@ -169,7 +169,7 @@ def test_readiness_enforced_through_application_service():
              'camera_error': 'stale', 'camera_frames_ready': False}
     RuntimeCommandBindings(service, teleop_engine=None, recorder=None,
                            readiness_snapshot=lambda: ready).install()
-    with pytest.raises(RuntimeError, match='must be ready'):
+    with pytest.raises(RuntimeError, match='尚未就绪'):
         service.dispatch(Command.START_TELEOP)
     assert service.state is WorkflowState.ROBOT_ENABLED
 

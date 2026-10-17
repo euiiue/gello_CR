@@ -7,24 +7,14 @@ import traceback
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
-    QScrollArea,
     QSpinBox,
-    QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -36,17 +26,8 @@ from gello_cr.app.settings import (
     discover_cameras,
 )
 
-PAGE_NOTES = {
-    "机械臂": "遥操作的位移、速度与跟踪保护。底层 Servo 参数在硬件配置文件中管理。"
-    "XYZ / 姿态限制仅用于笛卡尔模式，范围相对于跟随起点，不是绝对关节软限位。",
-    "GELLO": "当前标定、关节方向与控制模式沿用原配置。反馈频率同时决定关节跟随循环频率。",
-    "O6 动作": "编辑动作库并选择 J7 张开 / 闭合动作。仅保存参数，不发送手部动作。"
-    "六列顺序：拇指弯曲、拇指侧摆、食指、中指、无名指、小指。",
-    "数采与相机": "质量阈值用于标记 needs_review；机械臂停止阈值在“机械臂”页。"
-    "建议保存高 480 / 宽 640，训练时再缩放；画面来源和 ROI 在“相机画面”页设置。",
-    "规划": "默认操作速度、插值间隔和实际到位容差；保存后下次启动生效。",
-    "控制器连接": "连接参数在下次启动后使用；启动后仍需手动连接与使能。",
-}
+from .generated.ui_settings_page import Ui_OperatorSettingsDialog
+from .theme import WORKBENCH_STYLESHEET
 
 
 class OperatorSettingsDialog(QDialog):
@@ -62,75 +43,109 @@ class OperatorSettingsDialog(QDialog):
             self.setWindowFlags(Qt.Widget)
         self.settings = settings
         self.saved = False
-        self.setWindowTitle("参数设置")
-        self.resize(1020, 780)
+        self._ui = Ui_OperatorSettingsDialog()
+        self._ui.setupUi(self)
         if not embedded:
-            self.setMinimumSize(900, 650)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 20, 24, 20)
-        title = QLabel("参数设置")
-        title.setStyleSheet("font-size: 22px; font-weight: 600")
-        outer.addWidget(title)
-        note = QLabel("保存后下次启动生效 · 当前会话参数保持不变")
-        outer.addWidget(note)
-        outer.addWidget(
-            QLabel("Hardware Profile: " + settings.data["hardware"]["name"] + "（配置文件，只读）")
+            self.setStyleSheet(WORKBENCH_STYLESHEET)
+        self.tabs = self._ui.settings_tabs
+        self.actions_table = self._ui.settings_actions_table
+        self.add_action_button = self._ui.settings_add_action_button
+        self.delete_action_button = self._ui.settings_delete_action_button
+        self.open_action = self._ui.settings_open_action
+        self.closed_action = self._ui.settings_closed_action
+        self.recording_mode = self._ui.settings_recording_mode
+        self.dataset_format = self._ui.settings_dataset_format
+        self.camera_scan_button = self._ui.settings_camera_scan_button
+        self.camera_scan_status = self._ui.settings_camera_scan_status
+        self.error_label = self._ui.settings_error_label
+        self.buttons = self._ui.settings_buttons
+        self.title_label = self._ui.settings_title_label
+        self.profile_label = self._ui.settings_profile_label
+        self.path_label = self._ui.settings_path_label
+        self.fields_0 = self._ui.settings_fields_0
+        self.fields_1 = self._ui.settings_fields_1
+        self.master_label = self._ui.settings_master_label
+        self.fields_2 = self._ui.settings_fields_2
+        self.fields_3 = self._ui.settings_fields_3
+        self.fields_4 = self._ui.settings_fields_4
+        self.fields_5 = self._ui.settings_fields_5
+        self.camera_groups = [
+            self._ui.settings_camera_groups_0,
+            self._ui.settings_camera_groups_1,
+            self._ui.settings_camera_groups_2,
+        ]
+        self.camera_0_name = self._ui.settings_camera_0_name
+        self.camera_0_serial = self._ui.settings_camera_0_serial
+        self.camera_0_mode = self._ui.settings_camera_0_mode
+        self.camera_0_roi_0 = self._ui.settings_camera_0_roi_0
+        self.camera_0_roi_1 = self._ui.settings_camera_0_roi_1
+        self.camera_0_roi_2 = self._ui.settings_camera_0_roi_2
+        self.camera_0_roi_3 = self._ui.settings_camera_0_roi_3
+        self.camera_1_name = self._ui.settings_camera_1_name
+        self.camera_1_serial = self._ui.settings_camera_1_serial
+        self.camera_1_mode = self._ui.settings_camera_1_mode
+        self.camera_1_roi_0 = self._ui.settings_camera_1_roi_0
+        self.camera_1_roi_1 = self._ui.settings_camera_1_roi_1
+        self.camera_1_roi_2 = self._ui.settings_camera_1_roi_2
+        self.camera_1_roi_3 = self._ui.settings_camera_1_roi_3
+        self.camera_2_name = self._ui.settings_camera_2_name
+        self.camera_2_serial = self._ui.settings_camera_2_serial
+        self.camera_2_mode = self._ui.settings_camera_2_mode
+        self.camera_2_roi_0 = self._ui.settings_camera_2_roi_0
+        self.camera_2_roi_1 = self._ui.settings_camera_2_roi_1
+        self.camera_2_roi_2 = self._ui.settings_camera_2_roi_2
+        self.camera_2_roi_3 = self._ui.settings_camera_2_roi_3
+        self._ui.settings_recording_mode.setItemData(0, "tcp")
+        self._ui.settings_recording_mode.setItemData(1, "joint")
+        self._ui.settings_dataset_format.setItemData(0, "lerobot_v3")
+        self._ui.settings_dataset_format.setItemData(1, "lerobot_v21")
+        self._ui.settings_dataset_format.setItemData(2, "hdf5")
+        self._ui.settings_camera_0_mode.setItemData(0, "camera")
+        self._ui.settings_camera_0_mode.setItemData(1, "roi")
+        self._ui.settings_camera_1_mode.setItemData(0, "camera")
+        self._ui.settings_camera_1_mode.setItemData(1, "roi")
+        self._ui.settings_camera_2_mode.setItemData(0, "camera")
+        self._ui.settings_camera_2_mode.setItemData(1, "roi")
+        if embedded:
+            self.setMinimumSize(0, 0)
+        self.profile_label.setText(
+            "Hardware Profile: " + settings.data["hardware"]["name"] + "（配置文件，只读）"
         )
-        path_label = QLabel(str(settings.path))
-        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        path_label.setWordWrap(True)
-        outer.addWidget(path_label)
-        self.tabs = QTabWidget()
-        outer.addWidget(self.tabs, 1)
+        self.path_label.setText(str(settings.path))
+        self.master_label.setText(
+            f"主设备：{settings.data['master']['type']}  ·  "
+            f"控制模式：{settings.data['gello']['control_mode']}"
+        )
+        self.recording_mode.setCurrentIndex(
+            self.recording_mode.findData(settings.data["dataset"]["recording_mode"])
+        )
+        self.dataset_format.setCurrentIndex(
+            self.dataset_format.findData(settings.data["dataset"]["format"])
+        )
         self.editors: dict[str, list[QLineEdit]] = {}
-        for name, fields in SETTINGS_GROUPS.items():
-            page = QWidget()
-            layout = QVBoxLayout(page)
-            layout.setContentsMargins(16, 16, 16, 16)
-            description = QLabel(PAGE_NOTES[name])
-            description.setWordWrap(True)
-            layout.addWidget(description)
-            if name == "GELLO":
-                layout.addWidget(
-                    QLabel(
-                        f"主设备：{settings.data['master']['type']}  ·  "
-                        f"控制模式：{settings.data['gello']['control_mode']}"
-                    )
-                )
-            if name == "O6 动作":
-                self._build_actions(layout)
-            form = QFormLayout()
-            form.setVerticalSpacing(12)
-            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-            if name == "数采与相机":
-                self.recording_mode = QComboBox()
-                self.recording_mode.addItem("TCP 位姿（m / rad）＋ TCP 差值动作", "tcp")
-                self.recording_mode.addItem("CR3 关节 q1–q6（rad）＋绝对关节目标", "joint")
-                self.recording_mode.setCurrentIndex(
-                    self.recording_mode.findData(settings.data["dataset"]["recording_mode"])
-                )
-                form.addRow("采集状态 / 动作结构", self.recording_mode)
-                self.dataset_format = QComboBox()
-                for label, key in (
-                    ("LeRobot V3", "lerobot_v3"),
-                    ("LeRobot V2.1", "lerobot_v21"),
-                    ("HDF5", "hdf5"),
-                ):
-                    self.dataset_format.addItem(label, key)
-                self.dataset_format.setCurrentIndex(
-                    self.dataset_format.findData(settings.data["dataset"]["format"])
-                )
-                form.addRow("默认保存格式", self.dataset_format)
+        forms = (
+            self.fields_0,
+            self.fields_1,
+            self.fields_2,
+            self.fields_3,
+            self.fields_4,
+            self.fields_5,
+        )
+        for form, fields in zip(forms, SETTINGS_GROUPS.values(), strict=True):
+            # Designer owns each tab and form. The settings schema supplies the
+            # variable-length scalar/vector rows and action-table cells only.
             for field in fields:
                 value = field.value(settings.data)
                 values = value if field.count > 1 else [value]
                 row = QWidget()
+                row.setObjectName(f"settings_{field.path}_row")
                 row_layout = QHBoxLayout(row)
+                row_layout.setObjectName(f"settings_{field.path}_row_layout")
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 edits = []
                 for index, item in enumerate(values):
                     edit = QLineEdit(str(item))
-                    edit.setObjectName(f"{field.path}.{index}")
+                    edit.setObjectName(f"settings_{field.path}.{index}")
                     edit.setAccessibleName(f"{field.label} {index + 1}")
                     edit.setToolTip(field.path)
                     edit.setMinimumWidth(45)
@@ -138,79 +153,41 @@ class OperatorSettingsDialog(QDialog):
                     edits.append(edit)
                 self.editors[field.path] = edits
                 form.addRow(field.label, row)
-            layout.addLayout(form)
-            layout.addStretch()
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.NoFrame)
-            scroll.setWidget(page)
-            self.tabs.addTab(scroll, name)
-        self._build_camera_page()
-        self.error_label = QLabel()
-        self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #b3261e")
-        outer.addWidget(self.error_label)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Save).setText("保存参数")
-        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+                form.labelForField(row).setObjectName(f"settings_{field.path}_label")
+        self._populate_actions()
+        self._populate_camera_editors()
+        # QDialogButtonBox owns its standard buttons; Designer declares the
+        # button set, and we name/localize the native children after setupUi.
+        for kind, name, text in (
+            (QDialogButtonBox.Save, "settings_save_button", "保存参数"),
+            (QDialogButtonBox.Cancel, "settings_cancel_button", "取消"),
+        ):
+            button = self.buttons.button(kind)
+            button.setObjectName(name)
+            button.setText(text)
         self.buttons.accepted.connect(self._save)
         self.buttons.rejected.connect(self.reject)
-        outer.addWidget(self.buttons)
         self._initial_candidate = self._candidate()
 
-    def _build_camera_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        description = QLabel(
-            "三个窗口分别选择相机和画面类型，预览与 LeRobot 使用同一来源。"
-            "同一相机可用于多个窗口；ROI 为 0–1 的归一化坐标。保存后重新启动软件生效。"
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
-        self.camera_scan_button = QPushButton("刷新已连接相机")
+    def _populate_camera_editors(self):
         self.camera_scan_button.clicked.connect(self._scan_cameras)
-        layout.addWidget(self.camera_scan_button)
-        self.camera_scan_status = QLabel("可刷新选择设备，也可以直接填写相机序列号。")
-        self.camera_scan_status.setWordWrap(True)
-        layout.addWidget(self.camera_scan_status)
         self.camera_editors = []
         for index, stream in enumerate(camera_streams(self.settings.data["dataset"])):
-            group = QGroupBox(f"录制窗口 {index + 1}")
-            form = QFormLayout(group)
-            name = QLineEdit(stream.name)
-            serial = QComboBox()
-            serial.setEditable(True)
+            name = getattr(self, f"camera_{index}_name")
+            serial = getattr(self, f"camera_{index}_serial")
+            mode = getattr(self, f"camera_{index}_mode")
+            roi_edits = [getattr(self, f"camera_{index}_roi_{j}") for j in range(4)]
+            name.setText(stream.name)
             serial.addItem(stream.serial)
-            mode = QComboBox()
-            mode.addItem("相机完整画面", "camera")
-            mode.addItem("该相机的 ROI 裁剪", "roi")
             mode.setCurrentIndex(mode.findData(stream.mode))
-            roi_row = QWidget()
-            roi_layout = QHBoxLayout(roi_row)
-            roi_layout.setContentsMargins(0, 0, 0, 0)
-            roi_edits = []
-            for label, value in zip(("x1", "y1", "x2", "y2"), stream.roi_norm, strict=True):
-                roi_layout.addWidget(QLabel(label))
-                edit = QLineEdit(str(value))
-                edit.setAccessibleName(f"窗口 {index + 1} ROI {label}")
-                roi_layout.addWidget(edit)
-                roi_edits.append(edit)
-            form.addRow("窗口名称", name)
-            form.addRow("相机序列号", serial)
-            form.addRow("画面类型", mode)
-            form.addRow("裁剪范围", roi_row)
+            for edit, value in zip(roi_edits, stream.roi_norm, strict=True):
+                edit.setText(str(value))
+            roi_row = roi_edits[0].parentWidget()
             roi_row.setEnabled(stream.mode == "roi")
             mode.currentIndexChanged.connect(
                 lambda _index, row=roi_row, combo=mode: row.setEnabled(combo.currentData() == "roi")
             )
             self.camera_editors.append((name, serial, mode, roi_edits))
-            layout.addWidget(group)
-        layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setWidget(page)
-        self.tabs.addTab(scroll, "相机画面")
         self.cameras_discovered.connect(self._show_cameras)
 
     def _scan_cameras(self):
@@ -241,45 +218,17 @@ class OperatorSettingsDialog(QDialog):
                 combo.setEditText(selected)
         self.camera_scan_status.setText(f"检测到 {len(devices)} 台相机；刷新不会更改已选序列号。")
 
-    def _build_actions(self, layout):
-        self.actions_table = QTableWidget(0, 7)
-        self.actions_table.setHorizontalHeaderLabels(
-            [
-                "动作名称",
-                "拇指弯曲",
-                "拇指侧摆",
-                "食指弯曲",
-                "中指弯曲",
-                "无名指弯曲",
-                "小指弯曲",
-            ]
-        )
+    def _populate_actions(self):
         self.actions_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.actions_table.verticalHeader().setVisible(False)
-        self.actions_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.actions_table.setMinimumHeight(220)
         for name, values in self.settings.data["o6"]["actions"].items():
             self._add_action(name, values)
         self.actions_table.itemChanged.connect(self._refresh_action_choices)
-        layout.addWidget(self.actions_table)
-        actions_row = QHBoxLayout()
-        self.add_action_button = QPushButton("新增动作")
         self.add_action_button.clicked.connect(self._new_action)
-        self.delete_action_button = QPushButton("删除选中动作")
         self.delete_action_button.clicked.connect(self._delete_action)
-        actions_row.addWidget(self.add_action_button)
-        actions_row.addWidget(self.delete_action_button)
-        actions_row.addStretch()
-        layout.addLayout(actions_row)
-        self.open_action = QComboBox()
-        self.closed_action = QComboBox()
         self._refresh_action_choices()
         self.open_action.setCurrentText(self.settings.data["o6"]["open_action"])
         self.closed_action.setCurrentText(self.settings.data["o6"]["closed_action"])
-        form = QFormLayout()
-        form.addRow("J7 张开动作", self.open_action)
-        form.addRow("J7 闭合动作", self.closed_action)
-        layout.addLayout(form)
 
     def _add_action(self, name, values):
         row = self.actions_table.rowCount()

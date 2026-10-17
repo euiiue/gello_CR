@@ -914,165 +914,143 @@ class TeleopEngineTests(unittest.TestCase):
         self.assertIn("HOME", self.store.data["presets"])
         self.assertEqual(saved["robot_tcp"], self.robot.tcp)
 
-    def test_priority_home_needs_only_robot_and_preserves_recording(self):
+    def test_home_needs_only_enabled_robot(self):
         self.engine.save_home()
         target = self.robot.joints.copy()
         self.robot.joints = [20.0] * 7
         self.master.connected = False
         self.hand.connected = False
-        stopped = []
-        self.engine.return_home(lambda: stopped.append(self.robot.stopped))
-        self.assertEqual(stopped, [True])
+        self.engine.return_home()
+        self.assertTrue(self.robot.stopped)
         self.assertEqual(self.robot.movej_targets, [target])
         self.assertEqual(self.engine.state, "idle")
         self.assertIsNone(self.engine._home_thread)
         self.assertEqual(self.hand.targets, [])
 
-    def test_priority_home_also_returns_o6_when_connected(self):
+    def test_home_also_returns_o6_when_connected(self):
         self.engine.save_home()
         target = self.robot.joints.copy()
         home_o6 = tuple(self.store.data["o6"]["actions"][self.store.data["o6"]["open_action"]])
         self.robot.joints = [20.0] * 7
         self.hand.set_target((0, 0, 0, 0, 0, 0))
-        self.engine.return_home(lambda: None)
+        self.engine.return_home()
         self.assertEqual(self.robot.movej_targets, [target])
         self.assertEqual(self.hand.targets[-1], home_o6)
         self.assertEqual(self.hand.position, home_o6)
         self.assertEqual(self.engine.state, "idle")
 
-    def test_priority_home_returns_o6_and_clears_manual_override(self):
+    def test_home_returns_o6_and_clears_manual_override(self):
         self.engine.save_home()
         home_o6 = tuple(self.store.data["o6"]["actions"][self.store.data["o6"]["open_action"]])
         self.engine.execute_o6_action("抓取")
         self.assertTrue(self.engine.o6_manual_override)
-        self.engine.return_home(lambda: None)
+        self.engine.return_home()
         self.assertEqual(self.hand.position, home_o6)
         self.assertFalse(self.engine.o6_manual_override)
         self.assertEqual(self.engine.state, "idle")
 
-    def test_priority_home_cancels_old_replay_before_new_move(self):
+    def test_home_rejects_running_replay_without_preemption(self):
         self.engine.save_home()
-        exited = threading.Event()
-
-        def replay():
-            self.engine._replay_stop.wait(1.0)
-            self.robot.stop_motion()
-            exited.set()
-
-        self.engine._replay_thread = threading.Thread(target=replay)
-        self.engine._replay_thread.start()
         self.engine._set_state("replay")
-        self.engine.return_home(lambda: self.assertTrue(exited.is_set()))
-        self.assertFalse(self.engine.replaying)
-        self.assertIsNone(self.engine._follow_thread)
-        self.assertEqual(len(self.robot.movej_targets), 1)
-        self.assertEqual(self.engine.state, "idle")
+        lease = self.engine.motion.acquire(MotionSource.REPLAY)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "idle"):
+                self.engine.return_home()
+            self.assertTrue(lease.active)
+            self.assertEqual(self.robot.movej_targets, [])
+            self.assertEqual(self.engine.state, "replay")
+        finally:
+            lease.release()
+            self.engine._set_state("idle")
 
-    def test_priority_home_stop_during_power_on_prevents_move(self):
+    def test_home_stop_during_servo_check_prevents_move(self):
         self.engine.save_home()
-        self.robot.servo_state = lambda: 0
 
-        def power_on():
-            self.engine.emergency_stop("test stop during enable")
-            self.robot.servo_state = lambda: 3
+        def servo_state():
+            self.engine.emergency_stop("test stop during status check")
+            return 3
 
-        self.robot.power_on = power_on
-        with self.assertRaisesRegex(RuntimeError, "已被停止"):
-            self.engine.return_home(lambda: None)
+        self.robot.servo_state = servo_state
+        with self.assertRaisesRegex(RuntimeError, "已被停止|idle"):
+            self.engine.return_home()
         self.assertEqual(self.robot.movej_targets, [])
         self.assertEqual(self.engine.state, "fault")
 
-    def test_priority_home_enables_connected_robot_before_move(self):
+    def test_home_never_enables_connected_robot(self):
         self.engine.save_home()
         self.robot.servo_state = lambda: 0
         enabled = []
+        self.robot.power_on = lambda: enabled.append(True)
+        with self.assertRaisesRegex(RuntimeError, "使能"):
+            self.engine.return_home()
+        self.assertEqual(enabled, [])
+        self.assertEqual(self.robot.movej_targets, [])
+        self.assertEqual(self.engine.state, "idle")
 
-        def power_on():
-            enabled.append(True)
-            self.robot.servo_state = lambda: 3
+    def test_home_rejects_real_nrc_ready_state_before_waiting_for_stop(self):
+        self.engine.save_home()
+        api = FakeNrcServoApi(state=1)
+        adapter = NrcRobotAdapter(api, command_fd=11, servo_fd=22, robot_num=1)
+        self.engine.attach_robot(adapter)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "使能"):
+                self.engine.return_home()
+            self.assertEqual(self.engine.state, "idle")
+            commands = [call[0] for call in api.calls]
+            self.assertNotIn("set_servo_poweron_robot", commands)
+            self.assertNotIn("get_robot_running_state_robot", commands)
+        finally:
+            self.engine.attach_robot(self.robot)
 
-        self.robot.power_on = power_on
-        self.engine.return_home(lambda: None)
-        self.assertEqual(enabled, [True])
-        self.assertEqual(len(self.robot.movej_targets), 1)
-
-    def test_priority_home_cannot_overlap_another_home_or_follow(self):
+    def test_home_cannot_overlap_another_home_or_follow(self):
         self.engine.save_home()
         value = self._save_replay()
+        move = self.robot.movej
 
-        def during_recording_stop():
+        def during_move(*args):
             with self.assertRaisesRegex(RuntimeError, "HOME 回位正在执行"):
-                self.engine.return_home(lambda: None)
+                self.engine.return_home()
             with self.assertRaisesRegex(RuntimeError, "HOME 回位正在执行"):
                 self.engine.start_follow()
             with self.assertRaisesRegex(RuntimeError, "不允许轨迹回放"):
                 self.engine.replay_trajectory(value.metadata.trajectory_id, ReplayOptions())
+            move(*args)
 
-        self.engine.return_home(during_recording_stop)
+        self.robot.movej = during_move
+        self.engine.return_home()
         self.assertEqual(len(self.robot.movej_targets), 1)
 
-    def test_priority_home_recording_stop_failure_after_move(self):
+    def test_home_stop_confirmation_failure_latches_fault(self):
         self.engine.save_home()
-        target = self.robot.joints.copy()
-
-        def failed_recording_stop():
-            raise TimeoutError("recording did not stop")
-
-        with self.assertRaisesRegex(TimeoutError, "recording did not stop"):
-            self.engine.return_home(failed_recording_stop)
-        self.assertTrue(self.robot.stopped)
-        self.assertEqual(self.robot.movej_targets, [target])
+        confirmations = iter([True, False])
+        self.robot.wait_until_motion_stopped = lambda *a, **kw: next(confirmations)
+        with self.assertRaisesRegex(RuntimeError, "停止未确认"):
+            self.engine.return_home()
+        self.assertEqual(len(self.robot.movej_targets), 1)
         self.assertEqual(self.engine.state, "fault")
+        self.assertIsNone(self.engine.motion.current_owner)
 
-    def test_priority_home_records_home_motion_before_stopping_recording(self):
+    def test_home_rejects_active_and_pending_episode(self):
         self.engine.save_home()
-        target = self.robot.joints.copy()
-        self.robot.joints = [20.0] * 7
-        events = []
+        for episode in (
+            {"episode_active": True}, {"episode_pending": True, "buffered_frames": 3},
+        ):
+            self.engine.set_recording_snapshot(lambda: episode)
+            with self.assertRaisesRegex(RuntimeError, "Episode"):
+                self.engine.return_home()
+            self.assertEqual(self.robot.movej_targets, [])
+            self.assertEqual(self.engine.state, "idle")
 
-        def recording_stop():
-            # stop_recording must run only after the HOME MoveJ has been issued.
-            events.append(("stop_recording", list(self.robot.movej_targets)))
-
-        self.engine.return_home(recording_stop)
-        self.assertEqual(events, [("stop_recording", [target])])
-        self.assertEqual(self.engine.state, "idle")
-
-    def test_priority_home_joint_mode_sets_home_joint_action(self):
+    def test_home_does_not_publish_recording_actions(self):
         self.store.data["dataset"]["recording_mode"] = "joint"
         self.engine.save_home()
-        samples = []
+        self.engine.return_home()
+        self.assertIsNone(self.engine._dataset_target_joints_deg)
+        self.assertIsNone(self.engine._dataset_target_tcp_controller)
 
-        def recording_stop():
-            # stop_recording runs after the HOME MoveJ; joint mode must still
-            # produce a valid dataset sample instead of raising.
-            samples.append(self.engine.dataset_sample()["recording_mode"])
-
-        self.engine.return_home(recording_stop)
-        self.assertEqual(samples, ["joint"])
-        self.assertEqual(self.engine.state, "idle")
-
-    def test_priority_home_sets_joint_target_before_leaving_following(self):
-        self.store.data["dataset"]["recording_mode"] = "joint"
-        self.engine.save_home()
-        self.robot.servo_state = lambda: 0
-        seen = []
-
-        def power_on():
-            # power_on runs before MoveJ but after state leaves "following";
-            # the HOME joint target must already be in place to keep
-            # dataset_sample() from raising during the return window.
-            seen.append(self.engine._dataset_target_joints_deg is not None)
-            self.robot.servo_state = lambda: 3
-
-        self.robot.power_on = power_on
-        self.engine.return_home(lambda: None)
-        self.assertEqual(seen, [True])
-        self.assertEqual(self.engine.state, "idle")
-
-    def test_priority_home_missing_target_never_moves(self):
+    def test_home_missing_target_never_moves(self):
         with self.assertRaisesRegex(RuntimeError, "尚未保存"):
-            self.engine.return_home(lambda: None)
+            self.engine.return_home()
         self.assertEqual(self.robot.movej_targets, [])
 
     def test_home_returns_o6_control_to_m5_after_quick_action(self):
@@ -1080,7 +1058,7 @@ class TeleopEngineTests(unittest.TestCase):
         self.engine.execute_o6_action("抓取")
         self.assertTrue(self.engine.o6_manual_override)
 
-        self.engine.return_home(lambda: None)
+        self.engine.return_home()
 
         self.assertIsNone(self.engine._home_thread)
         self.assertEqual(self.engine.state, "idle")

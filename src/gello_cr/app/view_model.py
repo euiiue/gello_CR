@@ -20,6 +20,7 @@ from gello_cr.core.state_machine import (
     WorkflowStateMachine,
 )
 
+from .permissions import RECORDING_SOURCES, OperationContext, operation_permission
 from .service import ApplicationSnapshot
 
 _WORKFLOW_LABELS = {
@@ -68,6 +69,9 @@ class ApplicationViewModel:
     activity_text: str = ""
     actions: Mapping[Command, bool] = field(default_factory=dict)
     settings_editable: bool = False
+    action_reasons: Mapping[Command, str] = field(default_factory=dict)
+    recording_sources: Mapping[str, bool] = field(default_factory=dict)
+    recording_source_reasons: Mapping[str, str] = field(default_factory=dict)
 
 
 def _text(value: Any) -> str:
@@ -151,30 +155,28 @@ def build_application_view_model(
             else RecordingState.IDLE
         ),
     )
-    actions = {command: machine.can(command) for command in Command}
     ready = readiness or {}
-    if readiness is not None:
-        devices_ready = bool(ready.get("master_connected") and ready.get("o6_connected"))
-        cameras_ready = bool(ready.get("camera_frames_ready"))
-        actions[Command.START_TELEOP] &= devices_ready
-        actions[Command.START_EPISODE] &= cameras_ready
-        actions[Command.CREATE_DATASET] &= cameras_ready
-        actions[Command.PREPARE_DEVICES] &= not devices_ready
-        actions[Command.START_CAMERAS] &= not ready.get("cameras_running", False)
-        actions[Command.STOP_CAMERAS] &= bool(ready.get("cameras_running")) and not (
-            episode_active or episode_pending
-        )
-    session_active = bool(recorder.get("session_active"))
-    actions[Command.CREATE_DATASET] &= not session_active and not (
-        episode_active or episode_pending
+    context = OperationContext(state, machine.recording_state, recorder, runtime, readiness)
+    permissions = {command: operation_permission(command, context) for command in Command}
+    # FINISH needs an explicit outcome; expose each outcome through SAVE_* while
+    # recording as well, so the controller can show accurate result choices.
+    if episode_active:
+        for command, outcome in (
+            (Command.SAVE_SUCCESS, "success"),
+            (Command.SAVE_FAILURE, "failure"),
+        ):
+            permissions[command] = operation_permission(
+                Command.FINISH_EPISODE, context, {"outcome": outcome}
+            )
+    sources = {
+        source: operation_permission(Command.START_EPISODE, context, {"source": source})
+        for source in RECORDING_SOURCES
+    }
+    actions = {command: permission.allowed for command, permission in permissions.items()}
+    actions[Command.FINISH_EPISODE] = any(
+        permissions[command].allowed for command in (Command.SAVE_SUCCESS, Command.SAVE_FAILURE)
     )
-    actions[Command.FINALIZE_DATASET] &= session_active and not (episode_active or episode_pending)
-    actions[Command.RESET_FAULT] &= not (episode_active or episode_pending)
-    actions[Command.RESET_ESTOP] &= not (episode_active or episode_pending)
-    actions[Command.SELECT_DATASET_FORMAT] &= not session_active
-    actions[Command.REPLAY_TRAJECTORY] &= not episode_pending
-    actions[Command.EXECUTE_PLAN] &= not episode_pending
-    actions[Command.PLAN_MOTION] &= not episode_pending
+    session_active = bool(recorder.get("session_active"))
 
     headline = _headline(
         state,
@@ -188,6 +190,11 @@ def build_application_view_model(
         headline += " · PENDING：等待成功 / 失败 / 丢弃"
     return ApplicationViewModel(
         actions=actions,
+        action_reasons={command: permission.reason for command, permission in permissions.items()},
+        recording_sources={source: permission.allowed for source, permission in sources.items()},
+        recording_source_reasons={
+            source: permission.reason for source, permission in sources.items()
+        },
         settings_editable=state is WorkflowState.OFFLINE
         and not session_active
         and not (
@@ -204,7 +211,10 @@ def build_application_view_model(
             else MotionState.IDLE
         ),
         recording_state=(
-            RecordingState.FINALIZING
+            RecordingState.SAVING
+            if application.active_command
+            in (Command.FINISH_EPISODE, Command.SAVE_SUCCESS, Command.SAVE_FAILURE)
+            else RecordingState.FINALIZING
             if application.active_command in (Command.FINALIZE_DATASET, Command.FINALIZE_BATCH)
             else RecordingState.RECOVERING
             if application.active_command is Command.RESUME_BATCH
@@ -252,6 +262,7 @@ def command_activity(command):
         Command.START_CAMERAS: "正在启动相机",
         Command.START_TELEOP: "正在启动遥操",
         Command.START_EPISODE: "正在开始记录",
+        Command.FINISH_EPISODE: "正在结束并保存 Episode",
         Command.SAVE_SUCCESS: "正在保存成功 Episode",
         Command.SAVE_FAILURE: "正在保存失败 Episode",
         Command.CREATE_DATASET: "正在创建数据集",
