@@ -43,31 +43,30 @@ def test_window_polls_presenter_with_qtimer() -> None:
 
 
 def test_window_exposes_stop_episode_command() -> None:
-    source = _source("main_window.py")
+    source = _source("pages/collection.py")
 
     assert "Command.STOP_EPISODE" in source
     assert "episode_stop_button" in source
 
 
 def test_window_renders_view_model_policy() -> None:
-    source = _source("main_window.py")
-
-    assert "policy = view.policy" in source
-    assert "policy.start_teleop" in source
-    assert "policy.start_episode" in source
-    assert "policy.reset_estop" in source
+    source = _source('pages/collection.py')
+    assert 'view.actions.get(command' in source
+    assert 'Command.START_TELEOP' in source
+    assert 'Command.START_EPISODE' in source
+    assert 'view.actions[Command.RESET_ESTOP]' in _source('pages/robot_status.py')
 
 
 def test_preview_explicitly_contains_no_hardware_backend() -> None:
-    source = _source("preview.py")
+    source = (UI_ROOT.parents[2] / "examples/preview_ui.py").read_text(encoding="utf-8")
 
     assert "ApplicationService()" in source
-    assert "Phase6 preview" in source
+    assert "No Hardware" in source
     for token in (
         "Cr3aDevice",
         "NrcRobot",
         "TeleopEngine",
-        "LeRobotEpisodeRecorder",
+        "RecordingSession",
         "GelloDevice",
         "O6Device",
         "RealSense",

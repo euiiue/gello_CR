@@ -9,7 +9,7 @@ def _source(path):
 
 
 def test_main_window_has_three_preview_panels() -> None:
-    source = _source("src/gello_cr/ui/main_window.py")
+    source = _source("src/gello_cr/ui/pages/collection.py")
 
     assert '"Base RGB"' in source
     assert '"Wrist RGB"' in source
@@ -59,7 +59,7 @@ def test_operator_app_supplies_preview_source_without_starting_camera() -> None:
         "src/gello_cr/bootstrap/operator_app.py"
     )
 
-    # The concrete RecordingSampleSource exposes preview_snapshot(), while
+    # The concrete CR3O6CaptureSource exposes preview_snapshot(), while
     # alternate/test sample sources are allowed to fall back to an empty
     # preview.  Either way the preview source is injected through the
     # presentation boundary and camera hardware is never auto-started.

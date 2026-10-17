@@ -1,4 +1,3 @@
-
 """Read-only application view model for Qt/PySide presentation.
 
 The builder combines the workflow state, runtime snapshot and recorder snapshot
@@ -9,25 +8,31 @@ commands.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from gello_cr.core.state_machine import WorkflowState
+from gello_cr.core.state_machine import (
+    Command,
+    MotionState,
+    RecordingState,
+    RobotState,
+    WorkflowState,
+    WorkflowStateMachine,
+)
 
 from .service import ApplicationSnapshot
-from .workflow_ui import WorkflowUiPolicy, workflow_ui_policy
-
 
 _WORKFLOW_LABELS = {
     WorkflowState.OFFLINE: "OFFLINE",
     WorkflowState.CONNECTED: "CONNECTED",
     WorkflowState.ROBOT_ENABLED: "ROBOT_ENABLED",
     WorkflowState.TELEOP_RUNNING: "TELEOP_RUNNING",
-    WorkflowState.RECORDING: "RECORDING",
     WorkflowState.FAULT: "FAULT",
     WorkflowState.ESTOP: "ESTOP",
     WorkflowState.RETURNING_HOME: "RETURNING_HOME",
     WorkflowState.DAGGER_RUNNING: "DAGGER_RUNNING",
+    WorkflowState.REPLAY_RUNNING: "REPLAY_RUNNING",
+    WorkflowState.POINT_MOVE_RUNNING: "POINT_MOVE_RUNNING",
 }
 
 
@@ -48,10 +53,21 @@ class ApplicationViewModel:
     buffered_frames: int
     saved_episodes: int
     quality_needs_review: bool
-    policy: WorkflowUiPolicy
     dagger_phase: str = ""
     dagger_root: str = ""
     dagger_expert_frames: int = 0
+    motion_source: str = ""
+    motion_mode: str = "IDLE"
+    motion_running: bool = False
+    dataset_format: str = "lerobot_v3"
+    dataset_validation: Mapping[str, Any] | None = None
+    robot_state: RobotState = RobotState.OFFLINE
+    motion_state: MotionState = MotionState.IDLE
+    recording_state: RecordingState = RecordingState.IDLE
+    active_command: str = ""
+    activity_text: str = ""
+    actions: Mapping[Command, bool] = field(default_factory=dict)
+    settings_editable: bool = False
 
 
 def _text(value: Any) -> str:
@@ -61,11 +77,7 @@ def _text(value: Any) -> str:
 
 
 def _runtime_error(snapshot: Mapping[str, Any]) -> str:
-    return _text(
-        snapshot.get("error")
-        or snapshot.get("last_error")
-        or ""
-    )
+    return _text(snapshot.get("error") or snapshot.get("last_error") or "")
 
 
 def _headline(
@@ -77,18 +89,14 @@ def _headline(
 ) -> str:
     if state is WorkflowState.RETURNING_HOME:
         return "机械臂正在回 HOME · 可按紧急停止中断"
+    if state is WorkflowState.POINT_MOVE_RUNNING:
+        return "精确走点中 · 正在执行或等待目标到位"
+    if state is WorkflowState.REPLAY_RUNNING:
+        return "轨迹回放中 · 完成后保持停止"
     if state is WorkflowState.ESTOP:
         return "ESTOP：等待人工复位"
     if state is WorkflowState.FAULT:
         return "FAULT：等待排故 / 复位"
-    if state is WorkflowState.RECORDING:
-        if episode_active:
-            return f"RECORDING：Episode 录制中 · {buffered_frames} frames"
-        if episode_pending:
-            return (
-                "RECORDING：Episode 已停止，等待保存 failure/success 或丢弃"
-            )
-        return "RECORDING：等待 Episode 状态收敛"
     if state is WorkflowState.TELEOP_RUNNING:
         return "TELEOP_RUNNING：主从跟随运行中"
     if state is WorkflowState.DAGGER_RUNNING:
@@ -104,11 +112,14 @@ def build_application_view_model(
     application: ApplicationSnapshot,
     runtime: Mapping[str, Any],
     recorder: Mapping[str, Any],
+    readiness: Mapping[str, Any] | None = None,
 ) -> ApplicationViewModel:
     state = application.state
     episode_active = bool(recorder.get("episode_active", False))
     buffered_frames = max(0, int(recorder.get("buffered_frames", 0) or 0))
-    episode_pending = buffered_frames > 0 and not episode_active
+    episode_pending = not episode_active and bool(
+        recorder.get("episode_pending", buffered_frames > 0)
+    )
     quality = recorder.get("quality") or {}
     if not isinstance(quality, Mapping):
         quality = {}
@@ -130,24 +141,91 @@ def build_application_view_model(
     else:
         severity = "info"
 
+    machine = WorkflowStateMachine(
+        state,
+        recording_state=(
+            RecordingState.RECORDING
+            if episode_active
+            else RecordingState.PENDING
+            if episode_pending
+            else RecordingState.IDLE
+        ),
+    )
+    actions = {command: machine.can(command) for command in Command}
+    ready = readiness or {}
+    if readiness is not None:
+        devices_ready = bool(ready.get("master_connected") and ready.get("o6_connected"))
+        cameras_ready = bool(ready.get("camera_frames_ready"))
+        actions[Command.START_TELEOP] &= devices_ready
+        actions[Command.START_EPISODE] &= cameras_ready
+        actions[Command.CREATE_DATASET] &= cameras_ready
+        actions[Command.PREPARE_DEVICES] &= not devices_ready
+        actions[Command.START_CAMERAS] &= not ready.get("cameras_running", False)
+        actions[Command.STOP_CAMERAS] &= bool(ready.get("cameras_running")) and not (
+            episode_active or episode_pending
+        )
+    session_active = bool(recorder.get("session_active"))
+    actions[Command.CREATE_DATASET] &= not session_active and not (
+        episode_active or episode_pending
+    )
+    actions[Command.FINALIZE_DATASET] &= session_active and not (episode_active or episode_pending)
+    actions[Command.RESET_FAULT] &= not (episode_active or episode_pending)
+    actions[Command.RESET_ESTOP] &= not (episode_active or episode_pending)
+    actions[Command.SELECT_DATASET_FORMAT] &= not session_active
+    actions[Command.REPLAY_TRAJECTORY] &= not episode_pending
+    actions[Command.EXECUTE_PLAN] &= not episode_pending
+    actions[Command.PLAN_MOTION] &= not episode_pending
+
+    headline = _headline(
+        state,
+        episode_active=episode_active,
+        episode_pending=episode_pending,
+        buffered_frames=buffered_frames,
+    )
+    if episode_active:
+        headline += f" · RECORDING：{buffered_frames} frames"
+    elif episode_pending:
+        headline += " · PENDING：等待成功 / 失败 / 丢弃"
     return ApplicationViewModel(
+        actions=actions,
+        settings_editable=state is WorkflowState.OFFLINE
+        and not session_active
+        and not (
+            episode_active
+            or episode_pending
+            or ready.get("cameras_running")
+            or ready.get("master_connected")
+            or ready.get("o6_connected")
+        ),
+        robot_state=machine.robot_state,
+        motion_state=(
+            MotionState[str(runtime.get("motion", {}).get("source"))]
+            if runtime.get("motion", {}).get("source") in MotionState.__members__
+            else MotionState.IDLE
+        ),
+        recording_state=(
+            RecordingState.FINALIZING
+            if application.active_command in (Command.FINALIZE_DATASET, Command.FINALIZE_BATCH)
+            else RecordingState.RECOVERING
+            if application.active_command is Command.RESUME_BATCH
+            else RecordingState.RECORDING
+            if episode_active
+            else RecordingState.PENDING
+            if episode_pending
+            else RecordingState.IDLE
+        ),
+        active_command=application.active_command.name if application.active_command else "",
+        activity_text=command_activity(application.active_command),
         workflow_state=state,
         recovery_state=application.recovery_state,
         workflow_label=_WORKFLOW_LABELS[state],
         severity=severity,
-        headline=_headline(
-            state,
-            episode_active=episode_active,
-            episode_pending=episode_pending,
-            buffered_frames=buffered_frames,
-        ),
+        headline=headline,
         application_error=application_error,
         runtime_state=_text(runtime.get("state")) or "unknown",
         runtime_error=runtime_error,
         recording_error=recording_error,
-        dataset_session_active=bool(
-            recorder.get("session_active", False)
-        ),
+        dataset_session_active=bool(recorder.get("session_active", False)),
         episode_active=episode_active,
         episode_pending=episode_pending,
         buffered_frames=buffered_frames,
@@ -156,12 +234,33 @@ def build_application_view_model(
             int(recorder.get("saved_episodes", 0) or 0),
         ),
         quality_needs_review=quality_needs_review,
-        policy=workflow_ui_policy(
-            state,
-            episode_active=episode_active,
-            episode_pending=episode_pending,
-        ),
         dagger_phase=str(runtime.get("dagger", {}).get("phase", "")),
         dagger_root=str(runtime.get("dagger", {}).get("root", "")),
         dagger_expert_frames=int(runtime.get("dagger", {}).get("expert_frames", 0)),
+        motion_source=str(runtime.get("motion", {}).get("source") or "IDLE"),
+        motion_mode=str(runtime.get("motion", {}).get("mode", "IDLE")),
+        motion_running=bool(runtime.get("motion", {}).get("running", False)),
+        dataset_format=str(recorder.get("format") or "lerobot_v3"),
+        dataset_validation=recorder.get("validation"),
     )
+
+
+def command_activity(command):
+    return {
+        Command.CONNECT: "正在连接机器人",
+        Command.PREPARE_DEVICES: "正在连接遥操设备",
+        Command.START_CAMERAS: "正在启动相机",
+        Command.START_TELEOP: "正在启动遥操",
+        Command.START_EPISODE: "正在开始记录",
+        Command.SAVE_SUCCESS: "正在保存成功 Episode",
+        Command.SAVE_FAILURE: "正在保存失败 Episode",
+        Command.CREATE_DATASET: "正在创建数据集",
+        Command.PLAN_MOTION: "正在规划",
+        Command.REPLAY_TRAJECTORY: "正在启动回放",
+        Command.FINALIZE_DATASET: "正在完成并合并数据集",
+        Command.FINALIZE_BATCH: "正在合并批次",
+        Command.VALIDATE_DATASET: "正在校验数据集",
+        Command.RESUME_BATCH: "正在恢复批次",
+        Command.LIST_DATASETS: "正在扫描数据集",
+        Command.EXECUTE_PLAN: "正在启动规划轨迹",
+    }.get(command, "正在处理" if command else "")

@@ -180,6 +180,8 @@ class DynamixelDriver(DynamixelDriverProtocol):
         self._ids = ids
         self._joint_angles = None
         self._velocities = None
+        self._last_sample_timestamp = None
+        self._read_error = ""
         self._lock = Lock()
         self._port = port
         self._baudrate = baudrate
@@ -471,6 +473,13 @@ class DynamixelDriver(DynamixelDriverProtocol):
         self._reading_thread.start()
 
     def _read_joint_states(self):
+        try:
+            self._poll_joint_states()
+        except Exception as exc:
+            with self._lock:
+                self._read_error = f"Dynamixel feedback reader failed: {exc}"
+
+    def _poll_joint_states(self):
         # Continuously read joint angles and velocities
         while not self._stop_thread.is_set():
             # Seven servos at 57600 baud need a bounded bus interval; polling
@@ -516,7 +525,22 @@ class DynamixelDriver(DynamixelDriverProtocol):
                         )
                 self._joint_angles = _joint_angles
                 self._velocities = _velocities
+                self._last_sample_timestamp = time.monotonic()
             # self._groupSyncRead.clearParam()
+
+    def get_joint_sample(self):
+        """Return the last successful physical bus sample, without restamping it."""
+        if self._is_fake:
+            raise RuntimeError("Physical Dynamixel feedback is unavailable in fake mode")
+        with self._lock:
+            if self._read_error:
+                raise RuntimeError(self._read_error)
+            if self._last_sample_timestamp is None:
+                return None
+            return (
+                self._joint_angles.copy() / 2048.0 * np.pi,
+                self._last_sample_timestamp,
+            )
 
     def get_positions_and_velocities(self) -> Tuple[np.ndarray, np.ndarray]:
         if self._is_fake:

@@ -25,7 +25,7 @@ def test_external_fault_from_teleop_enters_fault() -> None:
 
 
 def test_external_fault_from_recording_uses_safe_recovery_target() -> None:
-    service = _service(WorkflowState.RECORDING)
+    service = _service(WorkflowState.TELEOP_RUNNING)
 
     service.report_external_fault("camera/robot fault")
 

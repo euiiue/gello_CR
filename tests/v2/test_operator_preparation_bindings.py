@@ -33,6 +33,9 @@ class Engine:
         self.o6 = O6()
         self.connect_calls = 0
 
+    def devices_connected(self):
+        return self.roarm.connected and self.o6.connected
+
     def connect_devices(self):
         self.connect_calls += 1
         self.roarm.connected = True

@@ -7,7 +7,7 @@ import pytest
 
 from gello_cr.app.service import ApplicationSnapshot
 from gello_cr.app.view_model import build_application_view_model
-from gello_cr.core.state_machine import WorkflowState
+from gello_cr.core.state_machine import Command, WorkflowState
 
 
 def _app(
@@ -34,7 +34,7 @@ def test_offline_view_model() -> None:
     assert vm.workflow_label == "OFFLINE"
     assert vm.headline.startswith("OFFLINE")
     assert vm.severity == "info"
-    assert vm.policy.connect_robot
+    assert vm.actions[Command.CONNECT]
 
 
 def test_connected_view_model_preserves_runtime_state() -> None:
@@ -45,8 +45,8 @@ def test_connected_view_model_preserves_runtime_state() -> None:
     )
 
     assert vm.runtime_state == "idle"
-    assert vm.policy.power_on
-    assert vm.policy.disconnect_robot
+    assert vm.actions[Command.POWER_ON]
+    assert vm.actions[Command.DISCONNECT]
 
 
 def test_robot_enabled_headline_never_claims_following() -> None:
@@ -57,7 +57,7 @@ def test_robot_enabled_headline_never_claims_following() -> None:
     )
 
     assert "跟随未启动" in vm.headline
-    assert vm.policy.start_teleop
+    assert vm.actions[Command.START_TELEOP]
 
 
 def test_teleop_running_headline() -> None:
@@ -68,12 +68,12 @@ def test_teleop_running_headline() -> None:
     )
 
     assert "主从跟随运行中" in vm.headline
-    assert vm.policy.start_episode
+    assert vm.actions[Command.START_EPISODE]
 
 
 def test_active_recording_contains_frame_count() -> None:
     vm = build_application_view_model(
-        _app(WorkflowState.RECORDING),
+        _app(WorkflowState.TELEOP_RUNNING),
         {"state": "following"},
         {
             "episode_active": True,
@@ -87,12 +87,12 @@ def test_active_recording_contains_frame_count() -> None:
     assert vm.buffered_frames == 42
     assert vm.saved_episodes == 3
     assert "42 frames" in vm.headline
-    assert vm.policy.stop_episode
+    assert vm.actions[Command.STOP_EPISODE]
 
 
 def test_pending_recording_is_warning_and_saveable() -> None:
     vm = build_application_view_model(
-        _app(WorkflowState.RECORDING),
+        _app(WorkflowState.TELEOP_RUNNING),
         {"state": "following"},
         {
             "episode_active": False,
@@ -102,9 +102,9 @@ def test_pending_recording_is_warning_and_saveable() -> None:
 
     assert vm.episode_pending
     assert vm.severity == "warning"
-    assert vm.policy.save_success
-    assert vm.policy.save_failure
-    assert vm.policy.discard_episode
+    assert vm.actions[Command.SAVE_SUCCESS]
+    assert vm.actions[Command.SAVE_FAILURE]
+    assert vm.actions[Command.DISCARD_EPISODE]
 
 
 def test_fault_is_error_and_uses_application_error() -> None:
@@ -122,7 +122,7 @@ def test_fault_is_error_and_uses_application_error() -> None:
     assert vm.application_error == "tracking timeout"
     assert vm.runtime_error == "runtime fault"
     assert vm.recovery_state is WorkflowState.ROBOT_ENABLED
-    assert vm.policy.reset_fault
+    assert vm.actions[Command.RESET_FAULT]
 
 
 def test_estop_is_always_error() -> None:
@@ -137,7 +137,7 @@ def test_estop_is_always_error() -> None:
 
     assert vm.severity == "error"
     assert vm.headline.startswith("ESTOP")
-    assert vm.policy.reset_estop
+    assert vm.actions[Command.RESET_ESTOP]
 
 
 def test_runtime_error_marks_view_error_even_outside_fault_state() -> None:
@@ -153,7 +153,7 @@ def test_runtime_error_marks_view_error_even_outside_fault_state() -> None:
 
 def test_recorder_error_marks_view_error() -> None:
     vm = build_application_view_model(
-        _app(WorkflowState.RECORDING),
+        _app(WorkflowState.TELEOP_RUNNING),
         {"state": "following"},
         {
             "buffered_frames": 8,
@@ -163,7 +163,7 @@ def test_recorder_error_marks_view_error() -> None:
 
     assert vm.recording_error == "disk problem"
     assert vm.severity == "error"
-    assert vm.policy.save_failure
+    assert vm.actions[Command.SAVE_FAILURE]
 
 
 def test_quality_review_marks_warning_without_error() -> None:
@@ -219,7 +219,7 @@ def test_builder_does_not_mutate_source_mappings() -> None:
     }
 
     build_application_view_model(
-        _app(WorkflowState.RECORDING),
+        _app(WorkflowState.TELEOP_RUNNING),
         runtime,
         recorder,
     )

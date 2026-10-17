@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+
+import pytest
 
 from gello_cr.bootstrap.operator_app import build_operator_application
 from gello_cr.core.state_machine import WorkflowState
@@ -185,3 +186,85 @@ def test_operator_application_retains_runtime_object(tmp_path) -> None:
 
     assert app.runtime is factory.runtime
     app.close()
+
+
+def test_unresolved_trajectory_requires_save_and_is_saved_on_explicit_exit(tmp_path):
+    class TrajectoryTeleop(Teleop):
+        pending = True
+        calls = []
+
+        def snapshot(self):
+            return {**super().snapshot(), "trajectory": {"frame_count": 2 if self.pending else 0}}
+
+        def stop_trajectory_recording(self):
+            self.calls.append("stop_trajectory")
+
+        def save_trajectory(self):
+            self.calls.append("save_trajectory")
+            self.pending = False
+
+    factory = Factory()
+    factory.runtime.teleop_engine = TrajectoryTeleop()
+    app = build_operator_application(tmp_path, factory=factory)
+    with pytest.raises(RuntimeError, match="轨迹"):
+        app.close()
+    assert not app.backend.presenter.closed
+    app.close(save_pending=True)
+    assert factory.runtime.teleop_engine.calls == ["stop_trajectory", "save_trajectory"]
+
+
+def test_partial_batch_prevents_shutdown_before_commands_are_closed(tmp_path):
+    class PartialRecorder(Recorder):
+        def snapshot(self):
+            return {**super().snapshot(), "partial_episodes": [{"episode_index": 2, "frame_count": 100}]}
+    factory = Factory()
+    factory.runtime.recorder = PartialRecorder()
+    app = build_operator_application(tmp_path, factory=factory)
+    with pytest.raises(RuntimeError, match="Partial"):
+        app.close(save_pending=True)
+    assert app._closed_resources == set()
+    assert not app.backend.presenter.closed
+    factory.runtime.recorder = Recorder()
+    app.close()
+
+
+def test_shutdown_stops_sampling_and_motion_before_cameras_and_workers(tmp_path):
+    factory = Factory()
+    order = []
+    factory.runtime.recorder.stop_episode = lambda: order.append("sampling")
+    factory.runtime.teleop_engine.shutdown = lambda **kw: order.append("motion")
+    factory.runtime.close = lambda: order.append("devices")
+    factory.runtime.recorder.close = lambda: order.append("worker")
+    app = build_operator_application(tmp_path, factory=factory)
+    app.cameras.close = lambda: order.append("cameras")
+    app.close()
+    assert order == ["sampling", "motion", "cameras", "devices", "worker"]
+
+
+@pytest.mark.parametrize("failed_stage", ["sampling", "motion"])
+def test_shutdown_preserves_dependencies_until_producers_stop(tmp_path, failed_stage):
+    factory = Factory()
+    order = []
+    failed = False
+
+    def stop(stage):
+        nonlocal failed
+        order.append(stage)
+        if stage == failed_stage and not failed:
+            failed = True
+            raise TimeoutError(f"{stage} still running")
+
+    factory.runtime.recorder.stop_episode = lambda: stop("sampling")
+    factory.runtime.teleop_engine.shutdown = lambda **kw: stop("motion")
+    factory.runtime.close = lambda: order.append("devices")
+    factory.runtime.recorder.close = lambda: order.append("worker")
+    app = build_operator_application(tmp_path, factory=factory)
+    app.cameras.close = lambda: order.append("cameras")
+    with pytest.raises(ExceptionGroup, match="shutdown incomplete"):
+        app.close()
+    assert "motion" in order
+    assert not {"cameras", "devices", "worker"}.intersection(order)
+    assert not app.backend.presenter.closed
+    app.close()
+    assert order[-3:] == ["cameras", "devices", "worker"]
+    assert app.backend.presenter.closed

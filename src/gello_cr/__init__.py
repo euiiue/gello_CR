@@ -1,8 +1,4 @@
-"""GELLO/robot teleoperation V2 package.
-
-The legacy application remains runnable during migration. New code belongs in
-this package and must not import UI modules from the legacy TEST_INEXBOT entrypoint.
-"""
+"""GELLO teleoperation, motion, trajectories, and format-independent recording."""
 
 __all__ = ["__version__"]
-__version__ = "0.1.0"
+__version__ = "1.0.0"

@@ -6,62 +6,45 @@ import numpy as np
 import pytest
 
 from gello_cr.data_contract import ACTION_FIELDS, STATE_FIELDS
-from gello_cr.recording.schema import (
-    LEROBOT_IMAGE_FEATURE_KEYS,
-    SAMPLE_IMAGE_KEYS,
-    dataset_features,
-    validate_recording_sample,
-)
+from dataclasses import replace
+from gello_cr.recording.frame import CaptureFrame
+from gello_cr.recording.schema import IMAGE_KEYS, recording_schema
+from gello_cr.recording.validation import validate_capture_frame
+from gello_cr.recording.writers.lerobot_v3 import LEROBOT_IMAGE_FEATURE_KEYS, dataset_features
 
 
-def _sample() -> dict[str, object]:
+def _sample():
     image = np.zeros((480, 640, 3), dtype=np.uint8)
-    return {
-        "timestamp": 10.0,
-        "observation_state": [0.0] * 18,
-        "action": [0.0] * 12,
-        "image_base_rgb": image,
-        "image_wrist_rgb": image,
-        "image_roi_rgb": image[:100, :100],
-    }
+    return CaptureFrame(10.0, (0.0,) * 18, (0.0,) * 12, {key: image for key in IMAGE_KEYS})
 
 
-def test_sample_keys_preserve_three_stream_contract() -> None:
-    assert SAMPLE_IMAGE_KEYS == (
-        "image_base_rgb",
-        "image_wrist_rgb",
-        "image_roi_rgb",
-    )
+def test_canonical_image_names_are_format_independent():
+    assert IMAGE_KEYS == ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
 
 
-def test_valid_sample_passes() -> None:
-    validate_recording_sample(_sample())
+def test_valid_sample_passes():
+    validate_capture_frame(_sample(), recording_schema("tcp"))
 
 
-def test_sample_rejects_wrong_state_and_action_dimensions() -> None:
-    sample = _sample()
-    sample["observation_state"] = [0.0] * 17
+def test_sample_rejects_wrong_state_and_action_dimensions():
     with pytest.raises(ValueError, match="18"):
-        validate_recording_sample(sample)
-
-    sample = _sample()
-    sample["action"] = [0.0] * 11
+        validate_capture_frame(
+            replace(_sample(), observation_state=(0.0,) * 17), recording_schema("tcp")
+        )
     with pytest.raises(ValueError, match="12"):
-        validate_recording_sample(sample)
+        validate_capture_frame(replace(_sample(), action=(0.0,) * 11), recording_schema("tcp"))
 
 
-def test_sample_rejects_nonfinite_state_or_action() -> None:
+def test_sample_rejects_nonfinite_state_or_action():
+    with pytest.raises(ValueError, match="finite"):
+        validate_capture_frame(replace(_sample(), action=(math.inf,) * 12), recording_schema("tcp"))
+
+
+def test_sample_rejects_non_rgb_shape():
     sample = _sample()
-    sample["action"] = [0.0] * 11 + [math.inf]
-    with pytest.raises(ValueError, match="non-finite"):
-        validate_recording_sample(sample)
-
-
-def test_sample_rejects_non_rgb_shape() -> None:
-    sample = _sample()
-    sample["image_roi_rgb"] = np.zeros((100, 100), dtype=np.uint8)
-    with pytest.raises(ValueError, match="image_roi_rgb"):
-        validate_recording_sample(sample)
+    sample.images["right_wrist_0_rgb"] = np.zeros((100, 100), dtype=np.uint8)
+    with pytest.raises(ValueError, match="right_wrist_0_rgb"):
+        validate_capture_frame(sample, recording_schema("tcp"))
 
 
 def test_dataset_features_use_frozen_state_and_action_names() -> None:

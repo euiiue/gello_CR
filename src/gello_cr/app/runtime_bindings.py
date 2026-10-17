@@ -1,10 +1,6 @@
-"""Bind the V2 ApplicationService to the existing runtime objects.
+"""Bind ApplicationService commands to motion orchestration and recording.
 
-This module is the transitional seam between the new UI-independent application
-layer and the validated legacy TeleopEngine / LeRobotEpisodeRecorder runtime.
-
-Robot lifecycle callbacks remain explicit because CR3A socket/device creation is
-still owned by the legacy Qt application at this migration stage.
+Robot connection and power callbacks are supplied by the bootstrap lifecycle.
 """
 
 from __future__ import annotations
@@ -13,8 +9,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from gello_cr.core.state_machine import Command
+from gello_cr.core.state_machine import Command, InvalidTransition
+from gello_cr.trajectory import ReplayMode, ReplayOptions
 
+from .background import BackgroundJobs
+from .datasets import DatasetCatalog
 from .service import ApplicationService
 
 LifecycleCallback = Callable[[], Any]
@@ -56,10 +55,51 @@ class RuntimeCommandBindings:
         self.service = service
         self.teleop_engine = teleop_engine
         self.recorder = recorder
+        self.datasets = DatasetCatalog(recorder)
         self.lifecycle = lifecycle or RuntimeLifecycleCallbacks()
+        self._trajectory_run = None
+        self._trajectory_serial = 0
+        self._point_serial = 0
+        self._point_run = None
+        self._completion_jobs = BackgroundJobs()
 
-    def install(self) -> "RuntimeCommandBindings":
+    def install(self) -> RuntimeCommandBindings:
+        self.service.set_recording_snapshot(self.recording_snapshot)
         handlers = {
+            Command.STOP_MOTION: self._stop_motion,
+            Command.REFRESH_ROBOT_STATUS: lambda p: self.teleop_engine.refresh_robot_status(),
+            Command.LIST_DATASETS: lambda p: self.datasets.scan(self._required_text(p, "root")),
+            Command.VALIDATE_DATASET: lambda p: self.datasets.validate(
+                self._required_text(p, "path")
+            ),
+            Command.READ_MOTION_POSITION: lambda p: self.teleop_engine.point_motion.read_position(),
+            Command.PLAN_MOTION: lambda p: self.teleop_engine.point_motion.plan(dict(p)),
+            Command.SAVE_MOTION_PLAN: lambda p: self.teleop_engine.point_motion.save(
+                self._required_text(p, "plan_id")
+            ),
+            Command.EXECUTE_PLAN: self._execute_plan,
+            Command.STOP_POINT_MOTION: self._stop_point_motion,
+            Command.POINT_MOTION_COMPLETED: self._point_completed,
+            Command.START_TRAJECTORY_RECORDING: lambda p: (
+                self.teleop_engine.start_trajectory_recording(self._required_text(p, "name"))
+            ),
+            Command.STOP_TRAJECTORY_RECORDING: self._stop_trajectory_recording,
+            Command.SAVE_TRAJECTORY: lambda p: self.teleop_engine.save_trajectory(),
+            Command.CANCEL_TRAJECTORY_RECORDING: lambda p: (
+                self.teleop_engine.cancel_trajectory_recording()
+            ),
+            Command.LIST_TRAJECTORIES: lambda p: self.teleop_engine.list_trajectories(),
+            Command.PREVIEW_TRAJECTORY: lambda p: self.teleop_engine.preview_trajectory(
+                self._required_text(p, "trajectory_id")
+            ),
+            Command.IMPORT_TRAJECTORY: lambda p: self.teleop_engine.import_trajectory(
+                self._required_text(p, "path"),
+                p.get("source", "legacy_json"),
+                p.get("episode_index", 0),
+            ),
+            Command.REPLAY_TRAJECTORY: self._replay_trajectory,
+            Command.STOP_TRAJECTORY_REPLAY: self._stop_trajectory_replay,
+            Command.TRAJECTORY_COMPLETED: self._trajectory_completed,
             Command.CONNECT: self._connect,
             Command.DISCONNECT: self._disconnect,
             Command.POWER_ON: self._power_on,
@@ -67,7 +107,26 @@ class RuntimeCommandBindings:
             Command.START_TELEOP: self._start_teleop,
             Command.STOP_TELEOP: self._stop_teleop,
             Command.START_EPISODE: self._start_episode,
+            Command.SELECT_DATASET_FORMAT: self._select_dataset_format,
+            Command.CREATE_DATASET: self._create_dataset,
+            Command.SCAN_RECOVERABLE_BATCHES: lambda p: self.recorder.refresh_recovery(),
+            Command.RESUME_BATCH: lambda p: self.recorder.recovery.resume(
+                self._required_text(p, "batch_id")
+            ),
+            Command.FINALIZE_BATCH: lambda p: self.recorder.recovery.finalize(
+                self._required_text(p, "batch_id")
+            ),
+            Command.DISCARD_BATCH: lambda p: self.recorder.recovery.discard(
+                self._required_text(p, "batch_id")
+            ),
+            Command.RESOLVE_PARTIAL_EPISODE: lambda p: self.recorder.recovery.resolve_partial(
+                self._required_text(p, "batch_id"),
+                int(p["episode_index"]),
+                self._required_text(p, "decision"),
+            ),
+            Command.SUSPEND_BATCH: lambda p: self.recorder.suspend("operator suspension"),
             Command.STOP_EPISODE: self._stop_episode,
+            Command.FINALIZE_DATASET: lambda p: self.recorder.finalize(),
             Command.SAVE_SUCCESS: self._save_success,
             Command.SAVE_FAILURE: self._save_failure,
             Command.DISCARD_EPISODE: self._discard_episode,
@@ -88,9 +147,7 @@ class RuntimeCommandBindings:
         command: Command,
     ) -> LifecycleCallback:
         if callback is None:
-            raise RuntimeError(
-                f"{command.name} runtime lifecycle callback is not configured"
-            )
+            raise RuntimeError(f"{command.name} runtime lifecycle callback is not configured")
         return callback
 
     @staticmethod
@@ -126,7 +183,8 @@ class RuntimeCommandBindings:
             raise RuntimeError("GELLO/master and O6 must be ready before this command")
 
     def _power_on(self, _payload: Mapping[str, Any]) -> Any:
-        self._require_readiness()
+        # Enabling the connected arm also supports replay without a master or
+        # hand. Follow and replay validate their own required input channels.
         return self._require_callback(
             self.lifecycle.power_on,
             Command.POWER_ON,
@@ -143,9 +201,7 @@ class RuntimeCommandBindings:
         return self.teleop_engine.start_follow()
 
     def _stop_teleop(self, payload: Mapping[str, Any]) -> Any:
-        reason = str(
-            payload.get("reason", "application command")
-        ).strip() or "application command"
+        reason = str(payload.get("reason", "application command")).strip() or "application command"
         return self.teleop_engine.stop_follow(reason)
 
     def _start_episode(self, payload: Mapping[str, Any]) -> Any:
@@ -158,7 +214,32 @@ class RuntimeCommandBindings:
         return self.recorder.start_episode(
             task,
             base_root,
-            metadata={**self.episode_metadata, **dict(metadata or {})},
+            metadata={
+                **self.episode_metadata,
+                **dict(metadata or {}),
+                **(
+                    {"task_description": str(payload["description"])}
+                    if payload.get("description")
+                    else {}
+                ),
+            },
+        )
+
+    def _select_dataset_format(self, payload):
+        if self.recorder.snapshot().get("session_active"):
+            raise RuntimeError("数据集已创建，完成当前数据集后才能切换格式")
+        self.recorder.writer_factory.select(self._required_text(payload, "format"))
+
+    def _create_dataset(self, payload):
+        self._require_readiness(cameras=True)
+        return self.recorder.create_dataset(
+            self._required_text(payload, "task"),
+            self._required_text(payload, "base_root"),
+            **(
+                {"task_description": str(payload["description"])}
+                if "description" in payload
+                else {}
+            ),
         )
 
     def _stop_episode(self, _payload: Mapping[str, Any]) -> Any:
@@ -180,23 +261,19 @@ class RuntimeCommandBindings:
         return self.recorder.discard_episode()
 
     def _report_fault(self, payload: Mapping[str, Any]) -> Any:
-        reason = str(
-            payload.get("reason", "runtime fault")
-        ).strip() or "runtime fault"
-        return self.teleop_engine.emergency_stop(
-            f"故障停止：{reason}"
-        )
+        reason = str(payload.get("reason", "runtime fault")).strip() or "runtime fault"
+        return self.teleop_engine.emergency_stop(f"故障停止：{reason}")
 
     def _emergency_stop(self, payload: Mapping[str, Any]) -> Any:
-        reason = str(
-            payload.get("reason", "软件紧急停止")
-        ).strip() or "软件紧急停止"
+        reason = str(payload.get("reason", "软件紧急停止")).strip() or "软件紧急停止"
         return self.teleop_engine.emergency_stop(reason)
 
     def _require_episode_resolved(self) -> None:
         if self.recording_snapshot is not None:
             episode = self.recording_snapshot()
-            if episode.get("episode_active") or episode.get("buffered_frames", 0):
+            if episode.get("episode_active") or episode.get(
+                "episode_pending", bool(episode.get("buffered_frames"))
+            ):
                 raise RuntimeError("Episode 未处理；复位前请先保存失败或明确丢弃")
 
     def _home_completed(self, _payload: Mapping[str, Any]) -> None:
@@ -220,3 +297,97 @@ class RuntimeCommandBindings:
             self.lifecycle.reset_estop,
             Command.RESET_ESTOP,
         )()
+
+    def _stop_trajectory_recording(self, _payload):
+        self.teleop_engine.stop_trajectory_recording()
+        return self.teleop_engine.save_trajectory()
+
+    def _replay_trajectory(self, payload):
+        options = dict(payload.get("options", {}))
+        options["mode"] = ReplayMode(options.get("mode", "relative"))
+        if options.get("joint_mask") is not None:
+            options["joint_mask"] = tuple(options["joint_mask"])
+        self._trajectory_serial += 1
+        run = self._trajectory_run = self._trajectory_serial
+        return self.teleop_engine.replay_trajectory(
+            self._required_text(payload, "trajectory_id"),
+            ReplayOptions(**options),
+            on_finished=lambda error: self._trajectory_finished(run, error),
+        )
+
+    def _stop_trajectory_replay(self, _payload):
+        self._trajectory_run = None
+        return self.teleop_engine.stop_trajectory_replay()
+
+    def _trajectory_completed(self, payload):
+        # Checked under normal dispatch serialization: an old completion must
+        # never finish a newer replay that started while this notice waited.
+        if self._trajectory_run is None or payload.get("run") != self._trajectory_run:
+            raise InvalidTransition("Trajectory completion belongs to an earlier replay")
+        self._trajectory_run = None
+
+    def _trajectory_finished(self, run, error):
+        if error:
+            if run == self._trajectory_run:
+                self.service.report_external_fault(f"轨迹回放失败：{error}")
+            return
+        # STOP holds the command lock while joining the playback worker. Its
+        # completion must return immediately and dispatch from another thread.
+        self._completion_jobs.start(
+            lambda: self._dispatch_trajectory_completion(run), name="Trajectory-Completion"
+        )
+
+    def _dispatch_trajectory_completion(self, run):
+        try:
+            self.service.dispatch(Command.TRAJECTORY_COMPLETED, {"run": run})
+        except InvalidTransition:
+            pass  # STOP/HOME/ESTOP or a newer replay already owns the workflow.
+
+    def _execute_plan(self, payload):
+        snapshot = self.recording_snapshot() if self.recording_snapshot is not None else {}
+        if snapshot.get(
+            "episode_pending", bool(snapshot.get("buffered_frames"))
+        ) and not snapshot.get("episode_active"):
+            raise RuntimeError("请先保存或丢弃待处理 Episode")
+        self._point_serial += 1
+        run = self._point_run = self._point_serial
+        try:
+            return self.teleop_engine.point_motion.execute(
+                self._required_text(payload, "plan_id"),
+                on_finished=lambda error: self._point_finished(run, error),
+            )
+        except Exception:
+            self._point_run = None
+            raise
+
+    def _stop_point_motion(self, payload):
+        self._point_run = None
+        return self.teleop_engine.point_motion.stop()
+
+    def _point_completed(self, payload):
+        if self._point_run is None or payload.get("run") != self._point_run:
+            raise InvalidTransition("Point motion completion belongs to an earlier execution")
+        self._point_run = None
+
+    def _point_finished(self, run, error):
+        if error:
+            if run == self._point_run:
+                self.service.report_external_fault(f"精确走点失败：{error}")
+            return
+        self._completion_jobs.start(
+            lambda: self._dispatch_point_completion(run), name="Point-Motion-Completion"
+        )
+
+    def _dispatch_point_completion(self, run):
+        try:
+            self.service.dispatch(Command.POINT_MOTION_COMPLETED, {"run": run})
+        except InvalidTransition:
+            pass
+
+    def _stop_motion(self, payload):
+        self._trajectory_run = self._point_run = None
+        return self.teleop_engine.stop_motion(str(payload.get("reason", "人工停止运动")))
+
+    def close(self, timeout=3.0):
+        self._trajectory_run = self._point_run = None
+        self._completion_jobs.close(timeout)

@@ -69,10 +69,8 @@ class RelativeJointMapper:
         origin = _six_finite(leader_origin_rad, "leader_origin_rad")
         locked = set(self.locked_indices)
         return tuple(
-            0.0
-            if index in locked
-            else self.joint_scale * wrapped_delta_rad(current, zero)
-            for index, (current, zero) in enumerate(zip(leader, origin))
+            0.0 if index in locked else self.joint_scale * wrapped_delta_rad(current, zero)
+            for index, (current, zero) in enumerate(zip(leader, origin, strict=True))
         )
 
     def target_deg(
@@ -86,7 +84,7 @@ class RelativeJointMapper:
         relative = self.relative_rad(leader_rad, leader_origin_rad)
         return tuple(
             base_deg + math.degrees(delta_rad)
-            for base_deg, delta_rad in zip(slave_origin, relative)
+            for base_deg, delta_rad in zip(slave_origin, relative, strict=True)
         )
 
     def leader_delta_rad(
@@ -99,8 +97,6 @@ class RelativeJointMapper:
         previous = _six_finite(previous_leader_rad, "previous_leader_rad")
         locked = set(self.locked_indices)
         return tuple(
-            0.0
-            if index in locked
-            else self.joint_scale * abs(wrapped_delta_rad(current, last))
-            for index, (current, last) in enumerate(zip(leader, previous))
+            0.0 if index in locked else self.joint_scale * abs(wrapped_delta_rad(current, last))
+            for index, (current, last) in enumerate(zip(leader, previous, strict=True))
         )

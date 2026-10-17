@@ -17,6 +17,17 @@ class SettingField:
     maximum: float | None = None
     count: int = 1
 
+    def value(self, data):
+        for key in self.path.split("."):
+            data = data[key]
+        return data
+
+    def assign(self, data, value):
+        keys = self.path.split(".")
+        for key in keys[:-1]:
+            data = data[key]
+        data[keys[-1]] = value
+
     def parse(self, texts: list[str]):
         values = []
         for text in texts:
@@ -47,9 +58,6 @@ class SettingField:
 # One field definition supplies both the form and its input validation.
 SETTINGS_GROUPS = {
     "机械臂": (
-        SettingField("robot.servoj_vmax", "ServoJ · vmax（SDK 值）", minimum=0.000001),
-        SettingField("robot.servoj_amax", "ServoJ · amax（SDK 值）", minimum=0.000001),
-        SettingField("robot.servoj_jmax", "ServoJ · jmax（SDK 值）", minimum=0.000001),
         SettingField(
             "robot.safety_max_command_step_rad", "单帧关节跳变上限（rad）", minimum=0.000001
         ),
@@ -109,7 +117,9 @@ SETTINGS_GROUPS = {
         SettingField("dataset.task", "默认任务描述", "text"),
         SettingField("dataset.repo_prefix", "数据集标识前缀（owner/name）", "text"),
         SettingField("dataset.fps", "采集帧率（Hz）", "int", 1, 60),
-        SettingField("dataset.image_size", "保存尺寸（高 / 宽，偶数；原画 480 / 640）", "int", 2, 2160, 2),
+        SettingField(
+            "dataset.image_size", "保存尺寸（高 / 宽，偶数；原画 480 / 640）", "int", 2, 2160, 2
+        ),
         SettingField("dataset.camera_max_age_s", "相机帧最大时龄（s）", minimum=0.000001),
         SettingField("dataset.camera_max_skew_s", "相机画面最大时间差（s）", minimum=0.000001),
         SettingField("dataset.action_max_age_s", "动作最大时龄（s）", minimum=0.000001),
@@ -117,6 +127,18 @@ SETTINGS_GROUPS = {
             "dataset.max_tracking_error_deg", "跟踪误差质量标记阈值（°）", minimum=0.000001
         ),
         SettingField("dataset.worker_python", "数采 Python 解释器", "text"),
+    ),
+    "规划": (
+        SettingField(
+            "planning.default_speed_scale", "默认速度比例（0–1）", minimum=0.01, maximum=1
+        ),
+        SettingField("planning.tcp_position_step_m", "直线位置采样间隔（m）", minimum=0.00001),
+        SettingField("planning.tcp_rotation_step_deg", "旋转采样间隔（°）", minimum=0.01),
+        SettingField("planning.reached.joint_tolerance_deg", "关节到位容差（°）", minimum=0.001),
+        SettingField(
+            "planning.reached.tcp_position_tolerance_mm", "TCP 到位容差（mm）", minimum=0.01
+        ),
+        SettingField("planning.reached.timeout_s", "到位等待时间（s）", minimum=0.1),
     ),
     "控制器连接": (
         SettingField("robot.ip", "控制器 IP / 主机名", "text"),
@@ -139,8 +161,7 @@ class OperatorSettings:
     def save(self, candidate: dict) -> None:
         for fields in SETTINGS_GROUPS.values():
             for field in fields:
-                section, key = field.path.split(".")
-                value = candidate[section][key]
+                value = field.value(candidate)
                 values = value if field.count > 1 else [value]
                 field.parse([str(item) for item in values])
         o6 = candidate["o6"]
@@ -161,3 +182,15 @@ class OperatorSettings:
         store.save()
         self._source_bytes = self.path.read_bytes()
         self.data = copy.deepcopy(store.data)
+
+
+def camera_streams(config):
+    from gello_cr.devices.camera_streams import resolve_camera_streams
+
+    return resolve_camera_streams(config)
+
+
+def discover_cameras(jobs, completed):
+    from gello_cr.devices.realsense import discover_realsense_cameras
+
+    jobs.start(discover_realsense_cameras, completed, name="CameraDiscovery")

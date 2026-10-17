@@ -1,10 +1,9 @@
-
 """Framework-independent presenter for the operator UI."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from gello_cr.app import (
@@ -27,6 +26,11 @@ class UiFrame:
     events: tuple[AppEvent, ...]
     readiness: OperatorReadiness = OperatorReadiness()
     preview: CameraPreview = CameraPreview()
+    trajectory: Mapping[str, Any] = field(default_factory=dict)
+    planning: Mapping[str, Any] = field(default_factory=dict)
+    catalog: Mapping[str, Any] = field(default_factory=dict)
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    dataset: Mapping[str, Any] = field(default_factory=dict)
 
 
 class OperatorUiPresenter:
@@ -38,6 +42,7 @@ class OperatorUiPresenter:
         *,
         runtime_snapshot: SnapshotSource,
         recorder_snapshot: SnapshotSource,
+        catalog_snapshot: SnapshotSource | None = None,
         readiness_snapshot: SnapshotSource | None = None,
         preview_snapshot: SnapshotSource | None = None,
         event_capacity: int = 256,
@@ -45,6 +50,7 @@ class OperatorUiPresenter:
         self._service = service
         self._runtime_snapshot = runtime_snapshot
         self._recorder_snapshot = recorder_snapshot
+        self._catalog_snapshot = catalog_snapshot
         self._readiness_snapshot = readiness_snapshot
         self._preview_snapshot = preview_snapshot
         self._events = ApplicationEventBuffer(capacity=event_capacity)
@@ -66,28 +72,30 @@ class OperatorUiPresenter:
 
         readiness_source = self._readiness_snapshot
         readiness = OperatorReadiness.from_mapping(
-            readiness_source()
-            if readiness_source is not None
-            else None
+            readiness_source() if readiness_source is not None else None
         )
 
         preview_source = self._preview_snapshot
         preview = CameraPreview.from_mapping(
-            preview_source()
-            if preview_source is not None
-            else None
+            preview_source() if preview_source is not None else None
         )
 
         view_model = build_application_view_model(
             self._service.snapshot(),
             runtime,
             recorder,
+            asdict(readiness),
         )
         return UiFrame(
             view_model=view_model,
             events=self._events.drain(),
             readiness=readiness,
             preview=preview,
+            trajectory=runtime.get("trajectory", {}),
+            planning=runtime.get("planning", {}),
+            dataset=recorder,
+            catalog=self._catalog_snapshot() if self._catalog_snapshot else {},
+            diagnostics=runtime.get("diagnostics", {}),
         )
 
     def close(self) -> None:

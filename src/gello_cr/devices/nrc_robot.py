@@ -1,19 +1,14 @@
 """NRC controller session for CR-series robots.
 
-This module extracts the already-proven NRC control logic from the legacy
-``teleop_runtime.NrcRobotAdapter`` without taking ownership of SDK loading or
-socket creation yet.
+SDK loading and socket creation belong to Cr3aDevice. This session owns
+serialized access, servo state transitions, and motion commands.
 
-Layering for the staged migration:
-
-    Cr3aDevice (later)
+    Cr3aDevice
         owns SDK loading + 6001/7000 connection lifecycle
             ↓
     NrcRobotSession (this module)
         owns serialized access, servo state machine and motion commands
 
-Keeping these responsibilities separate avoids changing the validated connection
-path in the same step as the motion-control refactor.
 """
 
 from __future__ import annotations
@@ -24,6 +19,8 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from gello_cr.errors import HardwareError
 
 NRC_RESULT_NAMES = {
     -6: "通信超时",
@@ -134,9 +131,7 @@ class NrcRobotSession:
 
     def _require_ok(self, result: Any, action: str) -> None:
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"{action}失败: {self._result_description(result)}"
-            )
+            raise HardwareError(f"{action}失败: {self._result_description(result)}")
 
     def _read_servo_state_unlocked(self) -> int:
         result = self.api.get_servo_state_robot(
@@ -145,12 +140,12 @@ class NrcRobotSession:
             0,
         )
         if not isinstance(result, (tuple, list)) or len(result) < 2:
-            raise RuntimeError(f"读取 CR5 伺服状态返回格式错误: {result}")
+            raise HardwareError(f"读取 CR5 伺服状态返回格式错误: {result}")
         self._require_ok(result[0], "读取 CR5 伺服状态")
 
         state = int(result[1])
         if state not in NRC_SERVO_STATE_NAMES:
-            raise RuntimeError(f"CR5 返回未知伺服状态: {state}")
+            raise HardwareError(f"CR5 返回未知伺服状态: {state}")
         return state
 
     def _read_current_mode_unlocked(self) -> int:
@@ -164,26 +159,16 @@ class NrcRobotSession:
             )
             last_result = result
 
-            if (
-                isinstance(result, (tuple, list))
-                and len(result) >= 2
-                and int(result[0]) == 0
-            ):
+            if isinstance(result, (tuple, list)) and len(result) >= 2 and int(result[0]) == 0:
                 return int(result[1])
 
-            if (
-                not isinstance(result, (tuple, list))
-                or len(result) < 1
-                or int(result[0]) != -1
-            ):
+            if not isinstance(result, (tuple, list)) or len(result) < 1 or int(result[0]) != -1:
                 break
 
             time.sleep(0.1)
 
         if not isinstance(last_result, (tuple, list)) or len(last_result) < 2:
-            raise RuntimeError(
-                f"读取 CR5 运行模式返回格式错误: {last_result}"
-            )
+            raise HardwareError(f"读取 CR5 运行模式返回格式错误: {last_result}")
 
         self._require_ok(last_result[0], "读取 CR5 运行模式")
         return int(last_result[1])
@@ -193,7 +178,7 @@ class NrcRobotSession:
         state = self._read_servo_state_unlocked()
 
         if state == 2:
-            raise RuntimeError("CR5 当前处于报警状态，不能切换运行模式")
+            raise HardwareError("CR5 当前处于报警状态，不能切换运行模式")
 
         if mode == 2 and state == 3:
             return
@@ -207,7 +192,7 @@ class NrcRobotSession:
             self._require_ok(result, "CR5 退出运行模式")
 
             if self._read_current_mode_unlocked() != 0:
-                raise RuntimeError("CR5 未能退出运行模式")
+                raise HardwareError("CR5 未能退出运行模式")
             time.sleep(0.1)
 
         result = self.api.set_current_mode_robot(
@@ -218,7 +203,7 @@ class NrcRobotSession:
         self._require_ok(result, "CR5 进入运行模式")
 
         if self._read_current_mode_unlocked() != 2:
-            raise RuntimeError("CR5 运行模式确认失败")
+            raise HardwareError("CR5 运行模式确认失败")
 
         time.sleep(min(0.3, float(timeout)))
 
@@ -244,17 +229,14 @@ class NrcRobotSession:
             time.sleep(0.05)
 
         expected_text = "/".join(
-            f"{state}-{self.servo_state_name(state)}"
-            for state in sorted(expected_states)
+            f"{state}-{self.servo_state_name(state)}" for state in sorted(expected_states)
         )
         detail = last_error or (
             f"最后状态={last_state}-{self.servo_state_name(last_state)}"
             if last_state is not None
             else "没有状态反馈"
         )
-        raise TimeoutError(
-            f"{action}超时，期望 {expected_text}，{detail}"
-        )
+        raise TimeoutError(f"{action}超时，期望 {expected_text}，{detail}")
 
     def wait_connections_ready(self, timeout: float = 10.0) -> None:
         """Wait for both 6001 command and 7000 servo sockets."""
@@ -268,33 +250,22 @@ class NrcRobotSession:
 
             while time.monotonic() < deadline:
                 with self.lock:
-                    last_status = int(
-                        self.api.get_connection_status(socket_fd)
-                    )
+                    last_status = int(self.api.get_connection_status(socket_fd))
                 if last_status == 0:
                     break
                 time.sleep(0.2)
             else:
-                raise TimeoutError(
-                    f"CR5 {label}连接未就绪，状态={last_status}"
-                )
+                raise TimeoutError(f"CR5 {label}连接未就绪，状态={last_status}")
 
     def connection_statuses(self) -> dict[str, int]:
         with self.lock:
             return {
-                "6001": int(
-                    self.api.get_connection_status(self.command_fd)
-                ),
-                "7000": int(
-                    self.api.get_connection_status(self.servo_fd)
-                ),
+                "6001": int(self.api.get_connection_status(self.command_fd)),
+                "7000": int(self.api.get_connection_status(self.servo_fd)),
             }
 
     def connections_ready(self) -> bool:
-        return all(
-            status == 0
-            for status in self.connection_statuses().values()
-        )
+        return all(status == 0 for status in self.connection_statuses().values())
 
     def servo_state(self) -> int:
         with self.lock:
@@ -310,14 +281,9 @@ class NrcRobotSession:
         actions: list[str] = []
 
         with self.lock:
-            connection_status = int(
-                self.api.get_connection_status(self.command_fd)
-            )
+            connection_status = int(self.api.get_connection_status(self.command_fd))
             if connection_status != 0:
-                raise RuntimeError(
-                    "CR5 6001 示教端口未连接，"
-                    f"状态={connection_status}"
-                )
+                raise HardwareError(f"CR5 6001 示教端口未连接，状态={connection_status}")
 
             initial_state = self._read_servo_state_unlocked()
             state = initial_state
@@ -334,9 +300,7 @@ class NrcRobotSession:
 
                 state = self._read_servo_state_unlocked()
                 if state == 2:
-                    raise RuntimeError(
-                        "CR5 清错后仍处于报警状态(2)"
-                    )
+                    raise HardwareError("CR5 清错后仍处于报警状态(2)")
                 actions.append("确认伺服报警已清除")
 
                 result = self.api.set_servo_poweroff_robot(
@@ -401,9 +365,8 @@ class NrcRobotSession:
                 )
 
             if state != 1:
-                raise RuntimeError(
-                    "CR5 无法上使能：当前伺服状态="
-                    f"{state}-{self.servo_state_name(state)}"
+                raise HardwareError(
+                    f"CR5 无法上使能：当前伺服状态={state}-{self.servo_state_name(state)}"
                 )
 
             result = self.api.set_servo_poweron_robot(
@@ -439,9 +402,7 @@ class NrcRobotSession:
                 )
 
             if initial_state == 2:
-                raise RuntimeError(
-                    "CR5 当前为伺服报警状态，请先清除报警"
-                )
+                raise HardwareError("CR5 当前为伺服报警状态，请先清除报警")
 
             result = self.api.set_servo_poweroff_robot(
                 self.command_fd,
@@ -481,9 +442,7 @@ class NrcRobotSession:
             or len(result) < 2
             or not self._result_ok(result[0])
         ):
-            raise RuntimeError(
-                f"读取 CR5 运行状态失败: {result}"
-            )
+            raise HardwareError(f"读取 CR5 运行状态失败: {result}")
 
         return int(result[1])
 
@@ -501,9 +460,7 @@ class NrcRobotSession:
                 return False
 
             if self.servo_state() != 3:
-                raise RuntimeError(
-                    "CR5 等待停止过程中退出运行状态"
-                )
+                raise HardwareError("CR5 等待停止过程中退出运行状态")
 
             if self.running_state() == 2:
                 stable = 0
@@ -529,23 +486,17 @@ class NrcRobotSession:
         values = [float(value) for value in output]
 
         if not self._result_ok(result) or len(values) < 7:
-            raise RuntimeError(
-                "读取 CR5 坐标失败"
-                f"(coord={coord}, ret={result}, len={len(values)})"
+            raise HardwareError(
+                f"读取 CR5 坐标失败(coord={coord}, ret={result}, len={len(values)})"
             )
 
         if not all(math.isfinite(value) for value in values[:7]):
-            raise RuntimeError(
-                f"CR3A 坐标反馈含非有限数值(coord={coord})"
-            )
+            raise HardwareError(f"CR3A 坐标反馈含非有限数值(coord={coord})")
 
         # Preserve the legacy near-zero wrap cleanup only.
         if int(coord) == 0:
             for index in range(6):
-                wrapped = (
-                    values[index]
-                    - 360.0 * round(values[index] / 360.0)
-                )
+                wrapped = values[index] - 360.0 * round(values[index] / 360.0)
                 if abs(wrapped) < 1.0:
                     values[index] = wrapped
 
@@ -567,16 +518,13 @@ class NrcRobotSession:
             return
 
         with self.lock:
-            enable_result = (
-                self.api.enable_servo_position_motion_control(
-                    self.servo_fd,
-                    True,
-                )
+            enable_result = self.api.enable_servo_position_motion_control(
+                self.servo_fd,
+                True,
             )
             if not self._result_ok(enable_result):
-                raise RuntimeError(
-                    "开启 CR5 servoJ 位置控制失败: "
-                    f"{self._result_description(enable_result)}"
+                raise HardwareError(
+                    f"开启 CR5 servoJ 位置控制失败: {self._result_description(enable_result)}"
                 )
 
             result = self.api.open_servoJ(
@@ -587,9 +535,7 @@ class NrcRobotSession:
             )
 
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"开启 CR5 servoJ 失败: {result}"
-            )
+            raise HardwareError(f"开启 CR5 servoJ 失败: {result}")
 
         self.servoj_open = True
 
@@ -605,18 +551,14 @@ class NrcRobotSession:
         self.servoj_open = False
 
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"停止 CR5 servoJ 失败: {result}"
-            )
+            raise HardwareError(f"停止 CR5 servoJ 失败: {result}")
 
     def inverse_kinematics(
         self,
         tcp: Sequence[float],
     ) -> list[float]:
         if len(tcp) != 7:
-            raise ValueError(
-                "CR5 TCP 目标必须包含 7 个值"
-            )
+            raise ValueError("CR5 TCP 目标必须包含 7 个值")
 
         target = self._vector(tcp)
         joints = self.api.VectorDouble(7)
@@ -633,9 +575,7 @@ class NrcRobotSession:
         values = [float(value) for value in joints]
 
         if not self._result_ok(result) or len(values) < 7:
-            raise RuntimeError(
-                f"CR5 逆运动学失败: {result}"
-            )
+            raise HardwareError(f"CR5 逆运动学失败: {result}")
 
         return values[:7]
 
@@ -644,9 +584,7 @@ class NrcRobotSession:
         joints: Sequence[float],
     ) -> list[float]:
         if len(joints) != 7:
-            raise ValueError(
-                "CR5 正运动学输入必须包含 7 个关节值"
-            )
+            raise ValueError("CR5 正运动学输入必须包含 7 个关节值")
 
         target = self._vector(joints)
         tcp = self.api.VectorDouble(7)
@@ -665,14 +603,9 @@ class NrcRobotSession:
         if (
             not self._result_ok(result)
             or len(values) < 7
-            or any(
-                not math.isfinite(value)
-                for value in values[:7]
-            )
+            or any(not math.isfinite(value) for value in values[:7])
         ):
-            raise RuntimeError(
-                f"CR5 正运动学失败: {result}"
-            )
+            raise HardwareError(f"CR5 正运动学失败: {result}")
 
         return values[:7]
 
@@ -683,9 +616,7 @@ class NrcRobotSession:
                     return False
 
                 if self._read_servo_state_unlocked() != 3:
-                    raise RuntimeError(
-                        "CR5 等待 MoveJ 空闲时退出运行状态"
-                    )
+                    raise HardwareError("CR5 等待 MoveJ 空闲时退出运行状态")
 
                 self._controller_job_warning = ""
 
@@ -696,17 +627,14 @@ class NrcRobotSession:
         joints: Sequence[float],
     ) -> bool:
         if len(joints) != 7:
-            raise ValueError(
-                "CR5 servoJ 目标必须包含 7 个值"
-            )
+            raise ValueError("CR5 servoJ 目标必须包含 7 个值")
 
         if self.motion_mode == "movej":
             now = time.monotonic()
 
             if (
                 self._last_movej_send_time is not None
-                and now - self._last_movej_send_time
-                < self.movej_period_s
+                and now - self._last_movej_send_time < self.movej_period_s
             ):
                 return False
 
@@ -731,9 +659,7 @@ class NrcRobotSession:
                 )
 
             if not self._result_ok(result):
-                raise RuntimeError(
-                    f"发送 CR5 MoveJ 失败: {result}"
-                )
+                raise HardwareError(f"发送 CR5 MoveJ 失败: {result}")
 
             self._last_movej_send_time = now
             return True
@@ -745,9 +671,7 @@ class NrcRobotSession:
             )
 
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"发送 CR5 servoJ 失败: {result}"
-            )
+            raise HardwareError(f"发送 CR5 servoJ 失败: {result}")
 
         return True
 
@@ -759,9 +683,7 @@ class NrcRobotSession:
         dec: float,
     ) -> None:
         if len(joints) != 7:
-            raise ValueError(
-                "CR5 MoveJ 目标必须包含 7 个值"
-            )
+            raise ValueError("CR5 MoveJ 目标必须包含 7 个值")
 
         self.stop_servoj()
 
@@ -780,9 +702,7 @@ class NrcRobotSession:
             )
 
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"CR5 MoveJ 下发失败: {result}"
-            )
+            raise HardwareError(f"CR5 MoveJ 下发失败: {result}")
 
     def movel(
         self,
@@ -792,9 +712,7 @@ class NrcRobotSession:
         dec: float,
     ) -> None:
         if len(tcp) != 7:
-            raise ValueError(
-                "CR5 MoveL 目标必须包含 7 个值"
-            )
+            raise ValueError("CR5 MoveL 目标必须包含 7 个值")
 
         self.stop_servoj()
 
@@ -813,9 +731,7 @@ class NrcRobotSession:
             )
 
         if not self._result_ok(result):
-            raise RuntimeError(
-                f"CR5 MoveL 下发失败: {result}"
-            )
+            raise HardwareError(f"CR5 MoveL 下发失败: {result}")
 
     def wait_until_joints(
         self,
@@ -828,10 +744,9 @@ class NrcRobotSession:
         while time.monotonic() < deadline:
             current = self.joint_position()
 
-            if max(
-                abs(a - b)
-                for a, b in zip(current[:6], target[:6])
-            ) <= float(tolerance_deg):
+            if max(abs(a - b) for a, b in zip(current[:6], target[:6], strict=True)) <= float(
+                tolerance_deg
+            ):
                 return True
 
             time.sleep(0.1)
@@ -839,12 +754,6 @@ class NrcRobotSession:
         return False
 
     def stop_motion(self) -> None:
-        if self.motion_mode == "movej":
-            with self.lock:
-                if self._controller_job_warning:
-                    self._last_movej_send_time = None
-                    return
-
         try:
             self.stop_servoj()
         finally:
@@ -856,4 +765,4 @@ class NrcRobotSession:
             )
             if stop is not None:
                 with self.lock:
-                    stop(self.command_fd)
+                    self._require_ok(stop(self.command_fd), "CR3A 队列运动停止")

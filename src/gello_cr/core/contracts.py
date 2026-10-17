@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +70,7 @@ class CameraSnapshot:
             raise ValueError("camera width/height must be positive")
         shape = getattr(self.image_rgb, "shape", None)
         if shape != (self.height, self.width, 3):
-            raise ValueError(
-                "camera RGB image shape must match (height, width, 3)"
-            )
+            raise ValueError("camera RGB image shape must match (height, width, 3)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +82,6 @@ class HandSnapshot:
     def __post_init__(self) -> None:
         if len(self.positions) != len(self.faults):
             raise ValueError("hand positions and faults must have the same length")
-
 
 
 @runtime_checkable

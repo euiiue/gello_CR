@@ -67,8 +67,7 @@ def command_step_rad(
     target = _six_finite(target_deg, "target_deg")
     previous = _six_finite(previous_target_deg, "previous_target_deg")
     return tuple(
-        abs(math.radians(current - last))
-        for current, last in zip(target, previous)
+        abs(math.radians(current - last)) for current, last in zip(target, previous, strict=True)
     )
 
 
@@ -82,7 +81,7 @@ def tracking_error_rad(
     actual = _six_finite(actual_deg, "actual_deg")
     return tuple(
         abs(math.radians(commanded - feedback))
-        for commanded, feedback in zip(target, actual)
+        for commanded, feedback in zip(target, actual, strict=True)
     )
 
 

@@ -3,87 +3,87 @@ from __future__ import annotations
 
 import pytest
 
-from gello_cr.app.workflow_ui import workflow_ui_policy
-from gello_cr.core.state_machine import WorkflowState
+from tests.fakes.ui import command_availability
+from gello_cr.core.state_machine import Command, WorkflowState
 
 
 def test_offline_only_allows_connect_workflow_control() -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.OFFLINE,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert policy.connect_robot
-    assert not policy.power_on
-    assert not policy.start_teleop
-    assert not policy.start_episode
-    assert not policy.emergency_stop
+    assert policy[Command.CONNECT]
+    assert not policy[Command.POWER_ON]
+    assert not policy[Command.START_TELEOP]
+    assert not policy[Command.START_EPISODE]
+    assert policy[Command.EMERGENCY_STOP]
 
 
 def test_connected_allows_power_and_estop() -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.CONNECTED,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert policy.power_on
-    assert policy.emergency_stop
-    assert not policy.start_teleop
+    assert policy[Command.POWER_ON]
+    assert policy[Command.EMERGENCY_STOP]
+    assert not policy[Command.START_TELEOP]
 
 
 def test_robot_enabled_allows_start_teleop() -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.ROBOT_ENABLED,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert policy.start_teleop
-    assert policy.emergency_stop
-    assert not policy.start_episode
+    assert policy[Command.START_TELEOP]
+    assert policy[Command.EMERGENCY_STOP]
+    assert policy[Command.START_EPISODE]
 
 
 def test_teleop_running_allows_episode_start() -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.TELEOP_RUNNING,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert policy.start_episode
-    assert policy.emergency_stop
-    assert not policy.save_success
-    assert not policy.discard_episode
+    assert policy[Command.START_EPISODE]
+    assert policy[Command.EMERGENCY_STOP]
+    assert not policy[Command.SAVE_SUCCESS]
+    assert not policy[Command.DISCARD_EPISODE]
 
 
 def test_recording_active_only_allows_episode_stop() -> None:
-    policy = workflow_ui_policy(
-        WorkflowState.RECORDING,
+    policy = command_availability(
+        WorkflowState.TELEOP_RUNNING,
         episode_active=True,
         episode_pending=False,
     )
 
-    assert policy.stop_episode
-    assert not policy.start_episode
-    assert not policy.save_success
-    assert not policy.save_failure
-    assert not policy.discard_episode
+    assert policy[Command.STOP_EPISODE]
+    assert not policy[Command.START_EPISODE]
+    assert not policy[Command.SAVE_SUCCESS]
+    assert not policy[Command.SAVE_FAILURE]
+    assert not policy[Command.DISCARD_EPISODE]
 
 
 def test_stopped_pending_recording_allows_save_discard_and_save_then_next() -> None:
-    policy = workflow_ui_policy(
-        WorkflowState.RECORDING,
+    policy = command_availability(
+        WorkflowState.TELEOP_RUNNING,
         episode_active=False,
         episode_pending=True,
     )
 
-    assert policy.start_episode
-    assert policy.save_success
-    assert policy.save_failure
-    assert policy.discard_episode
-    assert not policy.stop_episode
+    assert not policy[Command.START_EPISODE]
+    assert policy[Command.SAVE_SUCCESS]
+    assert policy[Command.SAVE_FAILURE]
+    assert policy[Command.DISCARD_EPISODE]
+    assert not policy[Command.STOP_EPISODE]
 
 
 @pytest.mark.parametrize(
@@ -93,56 +93,56 @@ def test_stopped_pending_recording_allows_save_discard_and_save_then_next() -> N
 def test_safe_state_allows_only_failure_resolution_for_pending_episode(
     safe_state,
 ) -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         safe_state,
         episode_active=False,
         episode_pending=True,
     )
 
-    assert not policy.start_episode
-    assert not policy.save_success
-    assert policy.save_failure
-    assert policy.discard_episode
+    assert not policy[Command.START_EPISODE]
+    assert not policy[Command.SAVE_SUCCESS]
+    assert policy[Command.SAVE_FAILURE]
+    assert policy[Command.DISCARD_EPISODE]
 
 
 def test_robot_enabled_allows_full_resolution_for_pending_episode() -> None:
     # After HOME, the workflow lands on ROBOT_ENABLED with a pending Episode;
     # the operator must still be able to save it as success.
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.ROBOT_ENABLED,
         episode_active=False,
         episode_pending=True,
     )
 
-    assert policy.save_success
-    assert policy.save_failure
-    assert policy.discard_episode
-    assert not policy.stop_episode
-    assert policy.start_teleop
+    assert policy[Command.SAVE_SUCCESS]
+    assert policy[Command.SAVE_FAILURE]
+    assert policy[Command.DISCARD_EPISODE]
+    assert not policy[Command.STOP_EPISODE]
+    assert policy[Command.START_TELEOP]
 
 
 def test_fault_allows_escalation_to_estop_but_estop_does_not() -> None:
-    fault = workflow_ui_policy(
+    fault = command_availability(
         WorkflowState.FAULT,
         episode_active=False,
         episode_pending=False,
     )
-    estop = workflow_ui_policy(
+    estop = command_availability(
         WorkflowState.ESTOP,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert fault.emergency_stop
-    assert not estop.emergency_stop
+    assert fault[Command.EMERGENCY_STOP]
+    assert not estop[Command.EMERGENCY_STOP]
 
 
 def test_fault_without_pending_episode_has_no_episode_resolution_controls() -> None:
-    policy = workflow_ui_policy(
+    policy = command_availability(
         WorkflowState.FAULT,
         episode_active=False,
         episode_pending=False,
     )
 
-    assert not policy.save_failure
-    assert not policy.discard_episode
+    assert not policy[Command.SAVE_FAILURE]
+    assert not policy[Command.DISCARD_EPISODE]

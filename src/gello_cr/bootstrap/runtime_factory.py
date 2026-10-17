@@ -1,4 +1,3 @@
-
 """Concrete construction of the current GELLO/CR3A/O6 collection runtime.
 
 Construction is intentionally side-effect free with respect to hardware.  The
@@ -8,19 +7,20 @@ power_on(), start_follow(), camera start, or recorder start_episode().
 
 from __future__ import annotations
 
-import importlib
-import os
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from gello_cr.app import RuntimeLifecycleCallbacks
-from gello_cr.devices.camera_streams import resolve_camera_streams
+from gello_cr.devices.camera_streams import camera_stream_metadata, resolve_camera_streams
 from gello_cr.devices.cr3a import Cr3aConfig, Cr3aDevice
 from gello_cr.devices.realsense import RealSenseRgbConfig, RealSenseRgbDevice
-
-from .sample_source import RecordingSampleSource
+from gello_cr.recording.batch import BatchManager, recording_profile
+from gello_cr.recording.formats import DatasetFormat, DatasetWriterConfig
+from gello_cr.recording.source import CR3O6CaptureSource
+from gello_cr.recording.writers.factory import WriterFactory
 
 EventCallback = Callable[[str, str], None]
 
@@ -38,23 +38,18 @@ class RuntimeFactoryPaths:
         repo_root: str | Path,
         *,
         config_path: str | Path | None = None,
-    ) -> 'RuntimeFactoryPaths':
+    ) -> RuntimeFactoryPaths:
         root = Path(repo_root).expanduser().resolve()
         config = (
             Path(config_path).expanduser().resolve()
             if config_path is not None
-            else root / 'config' / 'roarm_cr5_teleop.json'
+            else root / "config" / "workbench.json"
         )
-        nrc_root = root / 'vendor' / 'nrc'
+        nrc_root = root / "vendor" / "nrc"
         return cls(
             repo_root=root,
             config_path=config,
-            linker_hand_sdk_root=(
-                root
-                / 'vendor'
-                / 'linker_hand_python_sdk'
-                / 'LinkerHand'
-            ),
+            linker_hand_sdk_root=(root / "vendor" / "linker_hand_python_sdk" / "LinkerHand"),
             nrc_sdk_root=nrc_root if nrc_root.is_dir() else None,
         )
 
@@ -66,23 +61,29 @@ class RuntimeConstructors:
     Inverse3Controller: Any
     GelloController: Any
     O6Controller: Any
-    TeleopEngine: Any
-    LeRobotEpisodeRecorder: Any
+    TeleopRuntime: Any
+    RecordingSession: Any
     Cr3aDevice: Any = Cr3aDevice
     RealSenseRgbDevice: Any = RealSenseRgbDevice
 
     @classmethod
-    def load_defaults(cls) -> 'RuntimeConstructors':
-        teleop = importlib.import_module('teleop_runtime')
-        recorder = importlib.import_module('lerobot_recorder')
+    def load_defaults(cls) -> RuntimeConstructors:
+        from gello_cr.app.config_store import TeleopConfigStore
+        from gello_cr.app.runtime import TeleopRuntime
+        from gello_cr.devices.gello import GelloController
+        from gello_cr.devices.inverse3 import Inverse3Controller
+        from gello_cr.devices.o6 import O6Controller
+        from gello_cr.devices.roarm import RoArmSerialController
+        from gello_cr.recording.session import RecordingSession
+
         return cls(
-            TeleopConfigStore=teleop.TeleopConfigStore,
-            RoArmSerialController=teleop.RoArmSerialController,
-            Inverse3Controller=teleop.Inverse3Controller,
-            GelloController=teleop.GelloController,
-            O6Controller=teleop.O6Controller,
-            TeleopEngine=teleop.TeleopEngine,
-            LeRobotEpisodeRecorder=recorder.LeRobotEpisodeRecorder,
+            TeleopConfigStore=TeleopConfigStore.from_file,
+            RoArmSerialController=RoArmSerialController,
+            Inverse3Controller=Inverse3Controller,
+            GelloController=GelloController,
+            O6Controller=O6Controller,
+            TeleopRuntime=TeleopRuntime,
+            RecordingSession=RecordingSession,
         )
 
 
@@ -115,30 +116,27 @@ class Cr3aLifecycle:
             self._event_callback(level, message)
 
     def _robot_config(self) -> Cr3aConfig:
-        cfg = self._store.data['robot']
+        cfg = self._store.deployment_data()["robot"]
         return Cr3aConfig(
-            ip=str(cfg['ip']),
-            command_port=int(cfg.get('command_port', 6001)),
-            servo_port=int(cfg.get('servo_port', 7000)),
-            robot_num=int(cfg.get('robot_num', 1)),
-            motion_mode='servoj',
-            movej_velocity=float(cfg['movej_velocity']),
-            movej_acc=float(cfg['movej_acc']),
-            movej_dec=float(cfg['movej_dec']),
-            movej_period_s=float(cfg['movej_period_s']),
-            movej_low_latency=bool(cfg['movej_low_latency']),
-            servoj_vmax=float(cfg['servoj_vmax']),
-            servoj_amax=float(cfg['servoj_amax']),
-            servoj_jmax=float(cfg['servoj_jmax']),
-            sdk_root=cfg.get('sdk_root') or (
-                str(self._paths.nrc_sdk_root)
-                if self._paths.nrc_sdk_root is not None
-                else None
-            ),
+            ip=str(cfg["ip"]),
+            command_port=int(cfg.get("command_port", 6001)),
+            servo_port=int(cfg.get("servo_port", 7000)),
+            robot_num=int(cfg.get("robot_num", 1)),
+            motion_mode="servoj",
+            movej_velocity=float(cfg["movej_velocity"]),
+            movej_acc=float(cfg["movej_acc"]),
+            movej_dec=float(cfg["movej_dec"]),
+            movej_period_s=float(cfg["movej_period_s"]),
+            movej_low_latency=bool(cfg["movej_low_latency"]),
+            servoj_vmax=float(cfg["servoj_vmax"]),
+            servoj_amax=float(cfg["servoj_amax"]),
+            servoj_jmax=float(cfg["servoj_jmax"]),
+            sdk_root=cfg.get("sdk_root")
+            or (str(self._paths.nrc_sdk_root) if self._paths.nrc_sdk_root is not None else None),
         )
 
     def connect(self) -> Any:
-        if self.device is not None and getattr(self.device, 'connected', False):
+        if self.device is not None and getattr(self.device, "connected", False):
             return self.session
 
         device = self._device_constructor(
@@ -149,24 +147,24 @@ class Cr3aLifecycle:
             device.connect(timeout=10.0)
             session = device.session
             if session is None:
-                raise RuntimeError('CR3A connected without NRC session')
+                raise RuntimeError("CR3A connected without NRC session")
             self._teleop_engine.attach_robot(session)
-        except Exception:
+        except Exception as exc:
             try:
                 device.close()
-            finally:
-                pass
+            except Exception as cleanup_error:
+                exc.add_note(f"Failed connection cleanup: {cleanup_error}")
             raise
 
         self.device = device
         self.session = session
-        self._event('info', 'CR3A 已连接；未上使能，未启动 ServoJ')
+        self._event("info", "CR3A 已连接；未上使能，未启动 ServoJ")
         return session
 
     def _require_session(self) -> Any:
         session = self.session
         if session is None:
-            raise RuntimeError('CR3A 尚未连接')
+            raise RuntimeError("CR3A 尚未连接")
         return session
 
     def power_on(self) -> Any:
@@ -174,18 +172,17 @@ class Cr3aLifecycle:
         transition = session.power_on()
         state = int(session.servo_state())
         if state != 3:
-            raise RuntimeError(f'CR3A 上使能确认失败，servo_state={state}')
+            raise RuntimeError(f"CR3A 上使能确认失败，servo_state={state}")
         self._desired_enabled = True
         return transition
 
     def power_off(self) -> Any:
         session = self._require_session()
-        self._teleop_engine.emergency_stop('下使能前停止当前动作')
-        session.stop_motion()
+        self._teleop_engine.emergency_stop("下使能前停止当前动作")
         transition = session.power_off()
         state = int(session.servo_state())
         if state not in (0, 1):
-            raise RuntimeError(f'CR3A 下使能确认失败，servo_state={state}')
+            raise RuntimeError(f"CR3A 下使能确认失败，servo_state={state}")
         self._desired_enabled = False
         return transition
 
@@ -206,31 +203,23 @@ class Cr3aLifecycle:
                 state = int(session.servo_state())
 
             if state != 3:
-                raise RuntimeError(
-                    f'{label}失败，servo_state={state}'
-                )
+                raise RuntimeError(f"{label}失败，servo_state={state}")
 
         self._teleop_engine.acknowledge_fault()
 
         if self._desired_enabled:
-            message = (
-                f'{label}完成；恢复使能状态，保持 idle，'
-                '不自动恢复跟随'
-            )
+            message = f"{label}完成；恢复使能状态，保持 idle，不自动恢复跟随"
         else:
-            message = (
-                f'{label}完成；保持未使能状态，'
-                '不自动恢复跟随'
-            )
+            message = f"{label}完成；保持未使能状态，不自动恢复跟随"
 
-        self._event('info', message)
+        self._event("info", message)
         return transition
 
     def reset_fault(self) -> Any:
-        return self._reset('FAULT 复位')
+        return self._reset("FAULT 复位")
 
     def reset_estop(self) -> Any:
-        return self._reset('ESTOP 复位')
+        return self._reset("ESTOP 复位")
 
     def shutdown_power(self) -> None:
         session = self.session
@@ -246,7 +235,7 @@ class Cr3aLifecycle:
         errors = []
         if session is not None:
             try:
-                self._teleop_engine.detach_robot(session, 'ApplicationService 断开 CR3A')
+                self._teleop_engine.detach_robot(session, "ApplicationService 断开 CR3A")
             except Exception as exc:
                 errors.append(exc)
         if device is not None:
@@ -255,11 +244,11 @@ class Cr3aLifecycle:
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            raise ExceptionGroup('CR3A disconnect incomplete', errors)
+            raise ExceptionGroup("CR3A disconnect incomplete", errors)
         self.device = None
         self.session = None
         self._desired_enabled = False
-        self._event('info', 'CR3A 已断开；不会自动重连')
+        self._event("info", "CR3A 已断开；不会自动重连")
         return True
 
     def callbacks(self) -> RuntimeLifecycleCallbacks:
@@ -283,7 +272,7 @@ class ConcreteRuntime:
     master_controller: Any
     o6_controller: Any
     teleop_engine: Any
-    sample_source: RecordingSampleSource
+    sample_source: CR3O6CaptureSource
     recorder: Any
     camera_devices: dict[str, Any]
     cr3a_lifecycle: Cr3aLifecycle
@@ -295,16 +284,22 @@ class ConcreteRuntime:
     _closed_resources: set[str] = field(default_factory=set, init=False)
 
     def close(self) -> None:
-        """Attempt every cleanup; retain failures so a second close can retry."""
+        """Drain motion before releasing devices; failed cleanup can be retried."""
         errors = []
         steps = [
             ("motion", lambda: self.teleop_engine.shutdown(close_devices=False)),
+            *(
+                (name, lambda device=device: device.close(hold=False))
+                for name, device in (
+                    ("gello", self.gello_controller),
+                    ("inverse3", self.inverse3_controller),
+                    ("roarm", self.roarm_controller),
+                )
+                if device is not None
+            ),
+            ("o6", self.o6_controller.close),
             ("robot_power", self.cr3a_lifecycle.shutdown_power),
             ("robot_connection", self.cr3a_lifecycle.disconnect),
-            ("gello", lambda: self.gello_controller.close(hold=False)),
-            ("inverse3", lambda: self.inverse3_controller.close(hold=False)),
-            ("roarm", lambda: self.roarm_controller.close(hold=False)),
-            ("o6", self.o6_controller.close),
         ]
         for name, close in steps:
             if name in self._closed_resources:
@@ -314,6 +309,8 @@ class ConcreteRuntime:
             except Exception as exc:
                 exc.add_note(f"shutdown resource: {name}")
                 errors.append(exc)
+                if name == "motion":
+                    break
             else:
                 self._closed_resources.add(name)
         if errors:
@@ -337,70 +334,97 @@ class ConcreteRuntimeFactory:
     def build(self) -> ConcreteRuntime:
         c = self.constructors
         store = c.TeleopConfigStore(self.paths.config_path)
-        cfg = store.data
+        cfg = store.deployment_data()
 
-        roarm = c.RoArmSerialController(
-            cfg['roarm']['port'],
-            cfg['roarm']['baudrate'],
-            cfg['roarm']['feedback_hz'],
-        )
-        inverse3 = c.Inverse3Controller(
-            cfg['inverse3']['uri'],
-            cfg['inverse3']['device_id'],
-            cfg['inverse3']['grip_device_id'],
-            cfg['inverse3']['feedback_hz'],
-            basis=cfg['inverse3']['basis'],
-        )
-        gello_cfg = cfg['gello']
-        software_root = Path(gello_cfg['software_root']).expanduser()
-        if not software_root.is_absolute():
-            software_root = self.paths.config_path.parent / software_root
-        gello = c.GelloController(
-            port=gello_cfg['port'],
-            software_root=str(software_root.resolve()),
-            joint_ids=gello_cfg['joint_ids'],
-            joint_offsets=gello_cfg['joint_offsets'],
-            joint_signs=gello_cfg['joint_signs'],
-            gripper_config=gello_cfg['gripper_config'],
-            baudrate=gello_cfg['baudrate'],
-            feedback_hz=gello_cfg['feedback_hz'],
-            feedback_timeout_s=gello_cfg['feedback_timeout_s'],
-        )
-
-        master_type = str(cfg['master']['type'])
-        masters = {
-            'roarm': roarm,
-            'inverse3': inverse3,
-            'gello': gello,
-        }
-        if master_type not in masters:
-            raise ValueError(f'unsupported master type: {master_type}')
-        master = masters[master_type]
+        master_type = str(cfg["master"]["type"])
+        roarm = inverse3 = gello = None
+        if master_type == "gello":
+            gello_cfg = cfg["gello"]
+            software_root = Path(gello_cfg["software_root"]).expanduser()
+            if not software_root.is_absolute():
+                software_root = self.paths.config_path.parent / software_root
+            master = gello = c.GelloController(
+                port=gello_cfg["port"],
+                software_root=str(software_root.resolve()),
+                joint_ids=gello_cfg["joint_ids"],
+                joint_offsets=gello_cfg["joint_offsets"],
+                joint_signs=gello_cfg["joint_signs"],
+                gripper_config=gello_cfg["gripper_config"],
+                baudrate=gello_cfg["baudrate"],
+                feedback_hz=gello_cfg["feedback_hz"],
+                feedback_timeout_s=gello_cfg["feedback_timeout_s"],
+            )
+        elif master_type == "roarm":
+            master = roarm = c.RoArmSerialController(
+                cfg["roarm"]["port"],
+                cfg["roarm"]["baudrate"],
+                cfg["roarm"]["feedback_hz"],
+            )
+        elif master_type == "inverse3":
+            master = inverse3 = c.Inverse3Controller(
+                cfg["inverse3"]["uri"],
+                cfg["inverse3"]["device_id"],
+                cfg["inverse3"]["grip_device_id"],
+                cfg["inverse3"]["feedback_hz"],
+                basis=cfg["inverse3"]["basis"],
+            )
+        else:
+            raise ValueError(f"unsupported master type: {master_type}")
 
         o6 = c.O6Controller(
-            cfg['o6']['port'],
+            cfg["o6"]["port"],
             self.paths.linker_hand_sdk_root,
-            cfg['o6']['hand_id'],
-            cfg['o6']['baudrate'],
+            cfg["o6"]["hand_id"],
+            cfg["o6"]["baudrate"],
         )
-        engine = c.TeleopEngine(store, master, o6)
+        engine = c.TeleopRuntime(store, master, o6)
+        from gello_cr.diagnostics import diagnostic_report
+
+        engine.release_info = diagnostic_report(cfg, self.paths.repo_root)
 
         def runtime_event(level: str, message: str) -> None:
+            getattr(logging.getLogger("workbench.recording"), level)(message)
             engine.events.put((level, message))
             if self.event_callback is not None:
                 self.event_callback(level, message)
 
-        dataset_cfg = cfg['dataset']
-        worker_python = os.environ.get('GELLO_CR_DATA_PYTHON') or dataset_cfg['worker_python']
+        dataset_cfg = cfg["dataset"]
+        worker_python = dataset_cfg["worker_python"]
         streams = resolve_camera_streams(dataset_cfg)
-        sample_source = RecordingSampleSource(engine, dataset_cfg, streams=streams)
-        recorder = c.LeRobotEpisodeRecorder(
-            sample_provider=sample_source,
+        sample_source = CR3O6CaptureSource(engine.dataset_sample, dataset_cfg, streams=streams)
+        writer_factory = WriterFactory(
+            DatasetWriterConfig(
+                format=DatasetFormat(dataset_cfg.get("format", "lerobot_v3")),
+                worker_python=worker_python,
+                repo_prefix=dataset_cfg["repo_prefix"],
+                video_codec=dataset_cfg.get("video_codec"),
+                hdf5_compression=dataset_cfg.get("hdf5_compression"),
+            ),
+            worker_pythons=dataset_cfg.get("worker_pythons"),
+        )
+        recording_session = c.RecordingSession(
+            source=sample_source,
+            writer_factory=writer_factory,
             event_callback=runtime_event,
-            worker_python=worker_python,
-            repo_prefix=dataset_cfg['repo_prefix'],
-            fps=int(dataset_cfg['fps']),
-            image_size=tuple(dataset_cfg['image_size']),
+            fps=int(dataset_cfg["fps"]),
+            image_size=tuple(dataset_cfg["image_size"]),
+        )
+        default_root = Path(dataset_cfg.get("root") or self.paths.repo_root / "dataset" / "train")
+        staging_root = (
+            dataset_cfg.get("staging_root") or default_root.expanduser().parent / "staging"
+        )
+        recorder = BatchManager(
+            recording_session,
+            staging_root=staging_root,
+            writer_factory=writer_factory,
+            event_callback=runtime_event,
+            profile_provider=lambda: recording_profile(
+                mode=dataset_cfg.get("recording_mode", "tcp"),
+                fps=int(dataset_cfg["fps"]),
+                image_size=dataset_cfg["image_size"],
+                camera_configuration=camera_stream_metadata(resolve_camera_streams(dataset_cfg)),
+                hardware_profile={"robot": "cr3a", "hand_id": cfg["o6"]["hand_id"]},
+            ),
         )
 
         camera_devices = {
@@ -408,12 +432,18 @@ class ConcreteRuntimeFactory:
             for serial in dict.fromkeys(stream.serial for stream in streams)
         }
 
+        def hardware_event(level, message):
+            getattr(logging.getLogger("workbench.hardware"), level)(message)
+            engine.events.put((level, message))
+            if self.event_callback is not None:
+                self.event_callback(level, message)
+
         lifecycle = Cr3aLifecycle(
             store=store,
             teleop_engine=engine,
             paths=self.paths,
             device_constructor=c.Cr3aDevice,
-            event_callback=runtime_event,
+            event_callback=lambda level, message: hardware_event(level, message),
         )
 
         return ConcreteRuntime(

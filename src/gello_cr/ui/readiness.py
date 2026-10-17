@@ -1,4 +1,3 @@
-
 """Read-only device/camera readiness model for the new operator UI."""
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ class OperatorReadiness:
     cameras_running: bool = False
     camera_frames_ready: bool = False
     camera_error: str = ""
+    master_error: str = ""
+    o6_error: str = ""
 
     @property
     def devices_ready(self) -> bool:
@@ -25,24 +26,15 @@ class OperatorReadiness:
     def from_mapping(
         cls,
         snapshot: Mapping[str, Any] | None,
-    ) -> "OperatorReadiness":
+    ) -> OperatorReadiness:
         data = snapshot or {}
         return cls(
-            master_type=str(
-                data.get("master_type", "unknown")
-            ).strip()
-            or "unknown",
-            master_connected=bool(
-                data.get("master_connected", False)
-            ),
+            master_error=str(data.get("master_error", "")),
+            o6_error=str(data.get("o6_error", "")),
+            master_type=str(data.get("master_type", "unknown")).strip() or "unknown",
+            master_connected=bool(data.get("master_connected", False)),
             o6_connected=bool(data.get("o6_connected", False)),
-            cameras_running=bool(
-                data.get("cameras_running", False)
-            ),
-            camera_frames_ready=bool(
-                data.get("camera_frames_ready", False)
-            ),
-            camera_error=str(
-                data.get("camera_error", "") or ""
-            ).strip(),
+            cameras_running=bool(data.get("cameras_running", False)),
+            camera_frames_ready=bool(data.get("camera_frames_ready", False)),
+            camera_error=str(data.get("camera_error", "") or "").strip(),
         )

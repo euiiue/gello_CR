@@ -1,4 +1,3 @@
-
 """Create a PySide6 window from an already-composed OperatorBackend."""
 
 from __future__ import annotations

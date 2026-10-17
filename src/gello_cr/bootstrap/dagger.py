@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from gello_cr.core.state_machine import Command
+from gello_cr.motion.policy_adapter import PolicyRuntimeView
 
 
 class DaggerBindings:
@@ -39,7 +40,7 @@ class DaggerBindings:
 
     def start(self, payload):
         engine = self.runtime.teleop_engine
-        generation = engine._stop_generation
+        generation = engine.stop_generation
         if engine.state != "idle":
             raise RuntimeError("请先停止主从跟随，再启动 DAgger")
         recorded = self.runtime.recorder.snapshot()
@@ -90,7 +91,8 @@ class DaggerBindings:
             wrist_camera_serial=dataset["wrist_camera_serial"],
             roi_norm=tuple(dataset["base_roi_norm"]),
         )
-        robot = GelloRuntimeInterface(self.runtime, interface_cfg)
+        motion_view = PolicyRuntimeView(self.runtime)
+        robot = GelloRuntimeInterface(motion_view, interface_cfg)
         policy = DaggerPolicyClient(host, port, inference_timeout_s=self.timeout_s)
         recorder = None
         controller = None
@@ -135,7 +137,7 @@ class DaggerBindings:
                 intervention=InterventionInput(),
                 recorder=recorder,
             )
-            engine.start_external_control(controller, generation)
+            engine.start_external_control(controller, generation, motion_view=motion_view)
         except Exception as exc:
             errors = [exc]
             stop_motion = (

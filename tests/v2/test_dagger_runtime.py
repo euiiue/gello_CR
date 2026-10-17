@@ -6,8 +6,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from teleop_runtime import TeleopConfigStore, TeleopEngine
-from test_teleop_runtime import FakeO6, FakeRoArm, FakeRobot
+from gello_cr.app.config_store import TeleopConfigStore
+from gello_cr.app.runtime import TeleopRuntime as TeleopEngine
+from tests.fakes.runtime import FakeO6, FakeRoArm, FakeRobot
 
 
 @pytest.fixture
@@ -38,14 +39,14 @@ def controller():
 
 def test_dagger_reserves_one_motion_producer_and_finalizes_on_stop(engine):
     first = controller()
-    engine.start_external_control(first, engine._stop_generation)
+    engine.start_external_control(first, engine.stop_generation)
     assert first.started.wait(1) and engine.state == "dagger"
     producer = engine._follow_thread
     engine.start_follow()  # Existing start is idempotent while its slot is occupied.
     assert engine._follow_thread is producer
     second = controller()
     with pytest.raises(RuntimeError):
-        engine.start_external_control(second, engine._stop_generation)
+        engine.start_external_control(second, engine.stop_generation)
     second.robot.start_control.assert_not_called()
     engine.stop_follow("stop DAgger")
     first.request_stop.assert_called()
@@ -55,7 +56,7 @@ def test_dagger_reserves_one_motion_producer_and_finalizes_on_stop(engine):
 
 
 def test_estop_generation_cancels_late_dagger_start_before_servoj(engine):
-    generation = engine._stop_generation
+    generation = engine.stop_generation
     engine.emergency_stop("cancel startup")
     pending = controller()
     with pytest.raises(RuntimeError):
@@ -66,7 +67,7 @@ def test_estop_generation_cancels_late_dagger_start_before_servoj(engine):
 def test_home_stops_dagger_and_finalizes_before_starting_home(engine):
     engine.store.data["presets"]["HOME"] = {"robot_joints_deg": [1.0] * 6 + [0.0]}
     running = controller()
-    engine.start_external_control(running, engine._stop_generation)
+    engine.start_external_control(running, engine.stop_generation)
     assert running.started.wait(1)
     original_movej = engine.robot.movej
 

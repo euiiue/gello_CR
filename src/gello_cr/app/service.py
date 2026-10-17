@@ -1,4 +1,3 @@
-
 """Application command/event/state orchestration.
 
 Normal command handlers execute outside the state lock. This allows
@@ -8,6 +7,7 @@ handler while preserving one-at-a-time normal command execution.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -17,6 +17,7 @@ from typing import Any
 from gello_cr.core.state_machine import (
     Command,
     InvalidTransition,
+    RecordingState,
     WorkflowState,
     WorkflowStateMachine,
 )
@@ -30,6 +31,7 @@ _PRETRANSITION_COMMANDS = frozenset(
     {
         Command.REPORT_FAULT,
         Command.EMERGENCY_STOP,
+        Command.STOP_MOTION,
     }
 )
 
@@ -52,6 +54,8 @@ class ApplicationSnapshot:
     recovery_state: WorkflowState
     event_sequence: int
     last_error: str
+    recording_state: RecordingState = RecordingState.IDLE
+    active_command: Command | None = None
 
 
 class ApplicationService:
@@ -81,6 +85,23 @@ class ApplicationService:
         self._event_sequence = 0
         self._last_error = ""
         self._preemption_generation = 0
+        self._recording_snapshot = None
+        self._active_command = None
+        self._last_safety_command = None
+
+    def set_recording_snapshot(self, provider):
+        self._recording_snapshot = provider
+
+    def _sync_recording(self):
+        if self._recording_snapshot is not None:
+            value = self._recording_snapshot()
+            self._state_machine.recording_state = (
+                RecordingState.RECORDING
+                if value.get("episode_active")
+                else RecordingState.PENDING
+                if value.get("episode_pending", bool(value.get("buffered_frames")))
+                else RecordingState.IDLE
+            )
 
     @property
     def state(self) -> WorkflowState:
@@ -89,15 +110,19 @@ class ApplicationService:
 
     def snapshot(self) -> ApplicationSnapshot:
         with self._lock:
+            self._sync_recording()
             return ApplicationSnapshot(
                 state=self._state_machine.state,
                 recovery_state=self._state_machine.recovery_state,
                 event_sequence=self._event_sequence,
                 last_error=self._last_error,
+                recording_state=self._state_machine.recording_state,
+                active_command=self._active_command,
             )
 
     def can(self, command: Command) -> bool:
         with self._lock:
+            self._sync_recording()
             return self._state_machine.can(command)
 
     def set_handler(
@@ -152,20 +177,35 @@ class ApplicationService:
             self._preemption_generation += 1
             generation = self._preemption_generation
             self._state_machine.apply(command)
-            self._emit_locked(kind="state_changed", level=EventLevel.INFO,
-                              message="机械臂正在回 HOME", command=command, details=data)
+            self._emit_locked(
+                kind="state_changed",
+                level=EventLevel.INFO,
+                message="机械臂正在回 HOME",
+                command=command,
+                details=data,
+            )
         try:
             value = handler(data)
         except Exception as exc:
+            if self._preemption_generation != generation:
+                raise CommandSuperseded("HOME 回位被停止或故障中断") from exc
             self.report_external_fault(f"HOME 回位失败：{exc}")
             raise
         with self._lock:
-            if self._preemption_generation != generation or self.state is not WorkflowState.RETURNING_HOME:
+            if (
+                self._preemption_generation != generation
+                or self.state is not WorkflowState.RETURNING_HOME
+            ):
                 raise CommandSuperseded("HOME 回位被停止或故障中断")
             state = self._state_machine.apply(Command.HOME_COMPLETED)
             self._last_error = ""
-            self._emit_locked(kind="command_completed", level=EventLevel.INFO,
-                              message="机械臂已回 HOME，保持停止", command=command, details=data)
+            self._emit_locked(
+                kind="command_completed",
+                level=EventLevel.INFO,
+                message="机械臂已回 HOME，保持停止",
+                command=command,
+                details=data,
+            )
             return CommandResult(command, previous, state, value)
 
     def _dispatch_safety(
@@ -178,15 +218,13 @@ class ApplicationService:
             self._validate_locked(command, data)
             handler = self._handlers.get(command)
             new_state = self._state_machine.apply(command)
+            self._last_safety_command = command
             self._preemption_generation += 1
             self._last_error = ""
             self._emit_locked(
                 kind="state_changed",
                 level=EventLevel.WARNING,
-                message=(
-                    f"{previous_state.name} -> {new_state.name} "
-                    f"by {command.name}"
-                ),
+                message=(f"{previous_state.name} -> {new_state.name} by {command.name}"),
                 command=command,
                 details=data,
             )
@@ -196,6 +234,9 @@ class ApplicationService:
         except Exception as exc:
             with self._lock:
                 self._last_error = f"{type(exc).__name__}: {exc}"
+                if command is Command.STOP_MOTION and self._state_machine.can(Command.REPORT_FAULT):
+                    self._state_machine.apply(Command.REPORT_FAULT)
+                    self._last_safety_command = Command.REPORT_FAULT
                 self._emit_locked(
                     kind="command_failed",
                     level=EventLevel.ERROR,
@@ -231,6 +272,7 @@ class ApplicationService:
             previous_state = self._state_machine.state
             self._validate_locked(command, data)
             handler = self._handlers.get(command)
+            self._active_command = command
 
         try:
             value = handler(data) if handler is not None else None
@@ -245,12 +287,18 @@ class ApplicationService:
                     details=data,
                 )
             raise
+        finally:
+            with self._lock:
+                self._active_command = None
 
-        safety_reassert: tuple[
-            Command,
-            CommandHandler,
-            Mapping[str, Any],
-        ] | None = None
+        safety_reassert: (
+            tuple[
+                Command,
+                CommandHandler,
+                Mapping[str, Any],
+            ]
+            | None
+        ) = None
 
         with self._lock:
             current_state = self._state_machine.state
@@ -272,15 +320,12 @@ class ApplicationService:
                     superseded_command=command,
                 )
             else:
-                new_state = self._state_machine.apply(command)
+                new_state = self._state_machine.apply(command, validated=True)
                 self._last_error = ""
                 self._emit_locked(
                     kind="state_changed",
                     level=EventLevel.INFO,
-                    message=(
-                        f"{previous_state.name} -> {new_state.name} "
-                        f"by {command.name}"
-                    ),
+                    message=(f"{previous_state.name} -> {new_state.name} by {command.name}"),
                     command=command,
                     details=data,
                 )
@@ -318,30 +363,25 @@ class ApplicationService:
                         kind="safety_reasserted",
                         level=EventLevel.WARNING,
                         message=(
-                            f"{safety_command.name} reasserted after "
-                            f"{command.name} completed late"
+                            f"{safety_command.name} reasserted after {command.name} completed late"
                         ),
                         command=safety_command,
                         details=safety_payload,
                     )
 
-        raise CommandSuperseded(
-            f"{command.name} was superseded by {current_state.name}"
-        )
+        raise CommandSuperseded(f"{command.name} was superseded by {current_state.name}")
 
     def _validate_locked(
         self,
         command: Command,
         data: Mapping[str, Any],
     ) -> None:
+        self._sync_recording()
         if self._state_machine.can(command):
             return
 
         previous_state = self._state_machine.state
-        message = (
-            f"{command.name} is not allowed from "
-            f"{previous_state.name}"
-        )
+        message = f"{command.name} is not allowed from {previous_state.name}"
         self._emit_locked(
             kind="command_rejected",
             level=EventLevel.WARNING,
@@ -361,6 +401,11 @@ class ApplicationService:
             command = Command.EMERGENCY_STOP
         elif state is WorkflowState.FAULT:
             command = Command.REPORT_FAULT
+        elif self._last_safety_command is Command.STOP_MOTION and state in (
+            WorkflowState.ROBOT_ENABLED,
+            WorkflowState.CONNECTED,
+        ):
+            command = Command.STOP_MOTION
         else:
             return None
 
@@ -371,8 +416,7 @@ class ApplicationService:
         payload = MappingProxyType(
             {
                 "reason": (
-                    f"reassert {state.name} after late "
-                    f"{superseded_command.name} completion"
+                    f"reassert {state.name} after late {superseded_command.name} completion"
                 ),
                 "superseded_command": superseded_command.name,
             }
@@ -422,10 +466,7 @@ class ApplicationService:
             self._emit_locked(
                 kind="state_changed",
                 level=EventLevel.WARNING,
-                message=(
-                    f"{previous_state.name} -> {new_state.name} "
-                    "by external runtime fault"
-                ),
+                message=(f"{previous_state.name} -> {new_state.name} by external runtime fault"),
                 command=Command.REPORT_FAULT,
                 details=data,
             )
@@ -447,6 +488,7 @@ class ApplicationService:
         command: Command | None,
         details: Mapping[str, Any],
     ) -> None:
+        getattr(logging.getLogger("workbench.application"), level.value)(message)
         self._event_sequence += 1
         event = AppEvent(
             sequence=self._event_sequence,
@@ -463,4 +505,4 @@ class ApplicationService:
             try:
                 subscriber(event)
             except Exception:
-                continue
+                logging.getLogger("workbench.application").exception("Event subscriber failed")

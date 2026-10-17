@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gello_cr.recording.worker_service import WorkerDatasetService
+from gello_cr.recording.writers.lerobot_v3_worker import LeRobotV3WorkerService
 
 
 class FakeDataset:
@@ -53,7 +53,7 @@ class EncoderFactory:
 def _service():
     dataset_factory = Factory()
     encoder_factory = EncoderFactory()
-    service = WorkerDatasetService(
+    service = LeRobotV3WorkerService(
         dataset_factory=dataset_factory,
         encoder_factory=encoder_factory,
     )

@@ -1,4 +1,4 @@
-"""Legacy TCP and CR3 absolute-joint LeRobot recording contracts."""
+"""Canonical TCP and absolute-joint robot-learning field layouts."""
 
 STATE_DIM = 18
 ACTION_DIM = 12

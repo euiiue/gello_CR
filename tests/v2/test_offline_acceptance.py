@@ -1,5 +1,6 @@
 """Behavioral acceptance with injected devices; no SDK/serial/network I/O."""
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -53,7 +54,7 @@ def test_connect_power_reset_with_real_adapters_and_fake_sdk(tmp_path):
         (WorkflowState.CONNECTED, WorkflowState.CONNECTED),
         (WorkflowState.ROBOT_ENABLED, WorkflowState.ROBOT_ENABLED),
         (WorkflowState.TELEOP_RUNNING, WorkflowState.ROBOT_ENABLED),
-        (WorkflowState.RECORDING, WorkflowState.ROBOT_ENABLED),
+        (WorkflowState.TELEOP_RUNNING, WorkflowState.ROBOT_ENABLED),
     ],
 )
 @pytest.mark.parametrize(
@@ -103,8 +104,8 @@ def test_duplicate_command_rejected_while_safety_remains_available():
 def test_stale_camera_prevents_episode_before_worker_created(flag):
     recorder = _recorder()
     sample = _sample()
-    sample['quality'] = {flag: 1.0}
-    recorder.sample_provider = lambda: sample
+    sample = replace(sample, metadata={'quality': {flag: 1.0}})
+    recorder.source = SimpleNamespace(capture=lambda: sample)
     with pytest.raises(RuntimeError, match=flag):
         recorder.start_episode('task', '/unused')
     assert not recorder.snapshot()['session_active']
@@ -112,8 +113,8 @@ def test_stale_camera_prevents_episode_before_worker_created(flag):
 
 def test_quality_tracking_warning_does_not_reject_episode_preflight():
     sample = _sample()
-    sample['quality'] = {'tracking_error_exceeded': 1.0}
-    _recorder()._validate_sample(sample)
+    sample = replace(sample, metadata={'quality': {'tracking_error_exceeded': 1.0}})
+    _recorder()._validate_frame(sample)
 
 
 @pytest.mark.parametrize('snapshot', [{'episode_active': True}, {'buffered_frames': 2}])
@@ -133,19 +134,20 @@ def test_application_cleanup_continues_and_retries_only_failed_resources():
     backend = SimpleNamespace(
         command_port=SimpleNamespace(pending_commands=(), stop_accepting=lambda: None,
                                      close=lambda **kw: calls.append('commands')),
+        bindings=SimpleNamespace(close=lambda **kw: None),
         presenter=SimpleNamespace(close=lambda: calls.append('presenter')))
-    runtime = SimpleNamespace(close=fail_once, teleop_engine=SimpleNamespace(shutdown=lambda **kw: None), recorder=SimpleNamespace(
-        snapshot=lambda: {}, close=lambda: calls.append('recorder')))
+    runtime = SimpleNamespace(close=fail_once, teleop_engine=SimpleNamespace(shutdown=lambda **kw: None, snapshot=lambda: {}), recorder=SimpleNamespace(
+        snapshot=lambda: {}, stop_episode=lambda: None, close=lambda: calls.append('recorder')))
     app = OperatorApplication(runtime, backend, SimpleNamespace(close=lambda: calls.append('cameras')),
                               None, None)
     with pytest.raises(ExceptionGroup):
         app.close()
-    assert calls == ['commands', 'runtime', 'cameras', 'recorder']
+    assert calls == ['commands', 'cameras', 'runtime', 'recorder']
     app.close()
-    assert calls == ['commands', 'runtime', 'cameras', 'recorder', 'runtime', 'presenter']
+    assert calls == ['commands', 'cameras', 'runtime', 'recorder', 'runtime', 'presenter']
 
 
-def test_runtime_cleanup_attempts_all_devices_after_stop_failure():
+def test_runtime_cleanup_preserves_devices_after_stop_failure():
     calls = []
     def broken_stop(**kw):
         calls.append('stop')
@@ -158,7 +160,7 @@ def test_runtime_cleanup_attempts_all_devices_after_stop_failure():
                         disconnect=lambda: calls.append('disconnect')))
     with pytest.raises(ExceptionGroup):
         runtime.close()
-    assert calls == ['stop', 'power', 'disconnect', 'gello', 'inverse3', 'roarm', 'o6']
+    assert calls == ['stop']
 
 
 def test_readiness_enforced_through_application_service():
@@ -204,90 +206,8 @@ def test_cr3a_close_retries_only_failed_socket():
     assert closed == [11, 22, 11]
 
 
-def test_reset_from_connected_does_not_power_on_robot(tmp_path):
-    api = FakeNrcApi()
-    api.state = 1
-
-    engine = Engine()
-
-    life = Cr3aLifecycle(
-        store=Store(),
-        teleop_engine=engine,
-        paths=RuntimeFactoryPaths.from_repo(tmp_path),
-        device_constructor=lambda cfg, **kw: Cr3aDevice(
-            cfg,
-            api=api,
-            **kw,
-        ),
-    )
-
-    service = ApplicationService()
-
-    RuntimeCommandBindings(
-        service,
-        teleop_engine=engine,
-        recorder=None,
-        lifecycle=life.callbacks(),
-    ).install()
-
-    service.dispatch(Command.CONNECT)
-
-    assert service.state is WorkflowState.CONNECTED
-    assert life.session.servo_state() == 1
-
-    service.dispatch(Command.EMERGENCY_STOP)
-
-    assert service.state is WorkflowState.ESTOP
-
-    service.dispatch(Command.RESET_ESTOP)
-
-    assert service.state is WorkflowState.CONNECTED
-    assert life.session.servo_state() == 1
-    assert not life.session.servoj_open
 
 
-def test_reset_from_enabled_restores_enable_but_not_follow(tmp_path):
-    api = FakeNrcApi()
-    api.state = 1
-
-    engine = Engine()
-
-    life = Cr3aLifecycle(
-        store=Store(),
-        teleop_engine=engine,
-        paths=RuntimeFactoryPaths.from_repo(tmp_path),
-        device_constructor=lambda cfg, **kw: Cr3aDevice(
-            cfg,
-            api=api,
-            **kw,
-        ),
-    )
-
-    service = ApplicationService()
-
-    RuntimeCommandBindings(
-        service,
-        teleop_engine=engine,
-        recorder=None,
-        lifecycle=life.callbacks(),
-    ).install()
-
-    service.dispatch(Command.CONNECT)
-    service.dispatch(Command.POWER_ON)
-
-    assert service.state is WorkflowState.ROBOT_ENABLED
-    assert life.session.servo_state() == 3
-
-    service.dispatch(Command.EMERGENCY_STOP)
-
-    # Simulate controller dropping servo power during the safety event.
-    api.state = 1
-
-    service.dispatch(Command.RESET_ESTOP)
-
-    assert service.state is WorkflowState.ROBOT_ENABLED
-    assert life.session.servo_state() == 3
-    assert not life.session.servoj_open
 
 
 def test_reset_from_connected_does_not_power_on_robot(tmp_path):

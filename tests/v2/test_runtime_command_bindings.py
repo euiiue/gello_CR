@@ -10,6 +10,7 @@ from gello_cr.app.service import ApplicationService
 from gello_cr.core.state_machine import (
     Command,
     WorkflowState,
+    RecordingState,
     WorkflowStateMachine,
 )
 
@@ -46,7 +47,7 @@ def test_home_completion_cannot_clear_a_new_stop_or_active_motion(runtime_state)
 
 
 def test_home_completion_keeps_pending_data_and_never_restarts_follow():
-    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.RECORDING))
+    service = ApplicationService(state_machine=WorkflowStateMachine(state=WorkflowState.TELEOP_RUNNING))
     teleop = FakeTeleop()
     teleop.state = "idle"
     recorder = FakeRecorder()
@@ -55,6 +56,7 @@ def test_home_completion_keeps_pending_data_and_never_restarts_follow():
     assert service.state is WorkflowState.ROBOT_ENABLED
     assert recorder.calls == []
     assert teleop.calls == []
+    service._state_machine.recording_state = RecordingState.PENDING
     service.dispatch(Command.SAVE_FAILURE)
     assert service.state is WorkflowState.ROBOT_ENABLED
     assert teleop.calls == []
@@ -77,6 +79,18 @@ class FakeRecorder:
     def discard_episode(self):
         self.calls.append(("discard_episode",))
         return "discarded"
+
+    def finalize(self):
+        self.calls.append(("finalize",))
+        return "dataset-root"
+
+
+def test_finalize_dataset_uses_the_generic_recorder_without_changing_robot_state():
+    service, teleop, recorder = _bindings(WorkflowState.ROBOT_ENABLED)
+    result = service.dispatch(Command.FINALIZE_DATASET)
+    assert result.value == "dataset-root"
+    assert recorder.calls == [("finalize",)]
+    assert service.state is WorkflowState.ROBOT_ENABLED and not teleop.calls
 
 
 def _service_at(state):
@@ -143,6 +157,18 @@ def test_power_on_uses_lifecycle_callback() -> None:
     assert service.state is WorkflowState.ROBOT_ENABLED
 
 
+def test_power_on_for_arm_replay_does_not_require_master_or_hand():
+    service = _service_at(WorkflowState.CONNECTED)
+    calls = []
+    RuntimeCommandBindings(service, teleop_engine=FakeTeleop(), recorder=FakeRecorder(),
+        lifecycle=RuntimeLifecycleCallbacks(power_on=lambda: calls.append("power_on")),
+        readiness_snapshot=lambda: {"master_connected": False, "o6_connected": False},
+    ).install()
+    service.dispatch(Command.POWER_ON)
+    assert calls == ["power_on"]
+    assert service.state is WorkflowState.ROBOT_ENABLED
+
+
 def test_start_teleop_calls_existing_engine() -> None:
     service, teleop, _ = _bindings(
         WorkflowState.ROBOT_ENABLED
@@ -193,7 +219,7 @@ def test_start_episode_forwards_task_root_and_metadata() -> None:
             {"operator": "test"},
         )
     ]
-    assert service.state is WorkflowState.RECORDING
+    assert service.state is WorkflowState.TELEOP_RUNNING
 
 
 def test_start_episode_missing_task_keeps_teleop_state() -> None:
@@ -241,9 +267,10 @@ def test_save_commands_forward_outcome_and_notes(
     outcome,
 ) -> None:
     service, _, recorder = _bindings(
-        WorkflowState.RECORDING
+        WorkflowState.TELEOP_RUNNING
     )
 
+    service._state_machine.recording_state = RecordingState.PENDING
     service.dispatch(command, {"notes": "checked"})
 
     assert recorder.calls == [
@@ -254,9 +281,10 @@ def test_save_commands_forward_outcome_and_notes(
 
 def test_discard_episode_calls_existing_recorder() -> None:
     service, _, recorder = _bindings(
-        WorkflowState.RECORDING
+        WorkflowState.TELEOP_RUNNING
     )
 
+    service._state_machine.recording_state = RecordingState.PENDING
     service.dispatch(Command.DISCARD_EPISODE)
 
     assert recorder.calls == [("discard_episode",)]

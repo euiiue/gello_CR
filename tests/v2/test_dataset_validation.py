@@ -7,7 +7,7 @@ import pytest
 pq = pytest.importorskip('pyarrow.parquet')
 av = pytest.importorskip('av')
 
-from gello_cr.recording.schema import dataset_features, LEROBOT_IMAGE_FEATURE_KEYS
+from gello_cr.recording.writers.lerobot_v3 import dataset_features, LEROBOT_IMAGE_FEATURE_KEYS
 from gello_cr.recording.validate_dataset import validate_dataset
 
 

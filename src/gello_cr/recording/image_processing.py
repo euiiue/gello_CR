@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -68,7 +68,5 @@ def crop_normalized_roi(
     image = np.asarray(image_rgb)
     bounds = normalized_roi_bounds(image, roi_norm)
     left, top, right, bottom = bounds
-    crop = np.ascontiguousarray(
-        image[top:bottom, left:right]
-    ).copy()
+    crop = np.ascontiguousarray(image[top:bottom, left:right]).copy()
     return RoiCrop(bounds_px=bounds, image_rgb=crop)

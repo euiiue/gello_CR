@@ -80,7 +80,7 @@ def test_construction_does_not_load_sdk():
 
 def test_factory_preserves_robot_sdk_root(tmp_path):
     lifecycle = Cr3aLifecycle(
-        store=SimpleNamespace(data={**CFG, 'robot': {**CFG['robot'], 'sdk_root': '/configured/sdk'}}),
+        store=SimpleNamespace(deployment_data=lambda: {**CFG, 'robot': {**CFG['robot'], 'sdk_root': '/configured/sdk'}}),
         teleop_engine=None, paths=RuntimeFactoryPaths.from_repo(tmp_path),
     )
     assert lifecycle._robot_config().sdk_root == '/configured/sdk'

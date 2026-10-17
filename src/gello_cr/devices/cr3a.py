@@ -26,7 +26,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,11 +143,15 @@ class Cr3aDevice:
             self._api = self._api_loader()
             return self._api
 
-        root = Path(
-            os.environ.get("NRC_SDK_ROOT")
-            or self.config.sdk_root
-            or Path(__file__).resolve().parents[3] / "vendor" / "nrc"
-        ).expanduser().resolve()
+        root = (
+            Path(
+                os.environ.get("NRC_SDK_ROOT")
+                or self.config.sdk_root
+                or Path(__file__).resolve().parents[3] / "vendor" / "nrc"
+            )
+            .expanduser()
+            .resolve()
+        )
         if not (root / "nrc_interface.py").is_file():
             raise FileNotFoundError(
                 f"NRC Python module missing: {root / 'nrc_interface.py'}. "
@@ -207,9 +211,7 @@ class Cr3aDevice:
                 )
             )
             if command_fd <= 0:
-                raise ConnectionError(
-                    f"CR3A 6001 connection failed: fd={command_fd}"
-                )
+                raise ConnectionError(f"CR3A 6001 connection failed: fd={command_fd}")
 
             servo_fd = int(
                 api.connect_robot(
@@ -218,9 +220,7 @@ class Cr3aDevice:
                 )
             )
             if servo_fd <= 0:
-                raise ConnectionError(
-                    f"CR3A 7000 connection failed: fd={servo_fd}"
-                )
+                raise ConnectionError(f"CR3A 7000 connection failed: fd={servo_fd}")
 
             session = NrcRobotSession(
                 api,
@@ -322,19 +322,10 @@ class Cr3aDevice:
             raise RuntimeError("CR3A NRC TCP feedback has fewer than 6 values")
 
         timestamp = time.monotonic()
-        joint_positions_rad = tuple(
-            math.radians(float(value))
-            for value in joints_native_deg[:6]
-        )
+        joint_positions_rad = tuple(math.radians(float(value)) for value in joints_native_deg[:6])
         tcp = TcpPose(
-            xyz_m=tuple(
-                float(value) / 1000.0
-                for value in tcp_native[:3]
-            ),
-            rpy_rad=tuple(
-                float(value)
-                for value in tcp_native[3:6]
-            ),
+            xyz_m=tuple(float(value) / 1000.0 for value in tcp_native[:3]),
+            rpy_rad=tuple(float(value) for value in tcp_native[3:6]),
         )
 
         return RobotSnapshot(
@@ -379,10 +370,7 @@ class Cr3aDevice:
         if any(not math.isfinite(float(value)) for value in joints_rad):
             raise ValueError("CR3A V2 joint target contains non-finite values")
 
-        native_deg = [
-            math.degrees(float(value))
-            for value in joints_rad
-        ]
+        native_deg = [math.degrees(float(value)) for value in joints_rad]
         # NRC CR3A command shape remains seven values; ext-axis stays zero.
         native_deg.append(0.0)
         self._require_session().send_servoj(native_deg)

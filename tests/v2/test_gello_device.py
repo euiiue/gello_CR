@@ -32,6 +32,9 @@ class FakeRobot:
             self.index += 1
             return state
 
+    def get_joint_state_sample(self):
+        return self.get_joint_state(), time.monotonic()
+
     def close(self) -> None:
         self.closed = True
 

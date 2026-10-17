@@ -9,6 +9,7 @@ from gello_cr.core.state_machine import (
     Command,
     InvalidTransition,
     WorkflowState,
+    RecordingState,
     WorkflowStateMachine,
 )
 
@@ -37,30 +38,30 @@ def test_stop_episode_command_exists() -> None:
 
 
 def test_recording_can_stop_episode_without_leaving_recording() -> None:
-    machine = WorkflowStateMachine(state=WorkflowState.RECORDING)
+    machine = WorkflowStateMachine(state=WorkflowState.TELEOP_RUNNING, recording_state=RecordingState.RECORDING)
 
     assert machine.can(Command.STOP_EPISODE)
-    assert machine.apply(Command.STOP_EPISODE) is WorkflowState.RECORDING
+    assert machine.apply(Command.STOP_EPISODE) is WorkflowState.TELEOP_RUNNING
 
 
 def test_application_dispatch_stop_episode_keeps_recording_state() -> None:
     service = ApplicationService(
         state_machine=WorkflowStateMachine(
-            state=WorkflowState.RECORDING
+            state=WorkflowState.TELEOP_RUNNING, recording_state=RecordingState.RECORDING
         )
     )
 
     result = service.dispatch(Command.STOP_EPISODE)
 
-    assert result.previous_state is WorkflowState.RECORDING
-    assert result.state is WorkflowState.RECORDING
-    assert service.state is WorkflowState.RECORDING
+    assert result.previous_state is WorkflowState.TELEOP_RUNNING
+    assert result.state is WorkflowState.TELEOP_RUNNING
+    assert service.state is WorkflowState.TELEOP_RUNNING
 
 
 def test_runtime_binding_calls_recorder_stop_episode() -> None:
     service = ApplicationService(
         state_machine=WorkflowStateMachine(
-            state=WorkflowState.RECORDING
+            state=WorkflowState.TELEOP_RUNNING, recording_state=RecordingState.RECORDING
         )
     )
     recorder = Recorder()
@@ -73,7 +74,7 @@ def test_runtime_binding_calls_recorder_stop_episode() -> None:
     service.dispatch(Command.STOP_EPISODE)
 
     assert recorder.stopped == 1
-    assert service.state is WorkflowState.RECORDING
+    assert service.state is WorkflowState.TELEOP_RUNNING
 
 
 @pytest.mark.parametrize(

@@ -3,21 +3,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gello_cr.recording.frame import (
-    prepare_recording_frame,
-    resize_rgb_for_openpi,
-)
+from gello_cr.recording.frame import CaptureFrame
+from gello_cr.recording.schema import IMAGE_KEYS
+from gello_cr.recording.writers.lerobot_v3 import prepare_frame, resize_rgb_for_openpi
 
 
 def _sample(value_base: int = 1, value_wrist: int = 2, value_roi: int = 3):
-    return {
-        "timestamp": 10.0,
-        "observation_state": list(range(18)),
-        "action": list(range(12)),
-        "image_base_rgb": np.full((2, 2, 3), value_base, dtype=np.uint8),
-        "image_wrist_rgb": np.full((2, 2, 3), value_wrist, dtype=np.uint8),
-        "image_roi_rgb": np.full((2, 2, 3), value_roi, dtype=np.uint8),
-    }
+    return CaptureFrame(
+        10.0,
+        tuple(range(18)),
+        tuple(range(12)),
+        {
+            key: np.full((2, 2, 3), value, dtype=np.uint8)
+            for key, value in zip(IMAGE_KEYS, (value_base, value_wrist, value_roi), strict=True)
+        },
+    )
 
 
 def test_resize_same_shape_returns_contiguous_uint8() -> None:
@@ -53,14 +53,15 @@ def test_resize_rejects_non_rgb_shape() -> None:
 
 
 def test_prepare_frame_preserves_add_frame_payload_contract() -> None:
-    prepared = prepare_recording_frame(
+    prepared = prepare_frame(
         _sample(),
         task="Pick object",
         height=2,
         width=2,
+        recording_mode="tcp",
     )
 
-    assert prepared.payload == {
+    assert prepared[0] == {
         "op": "add_frame",
         "recording_mode": "tcp",
         "state": [float(value) for value in range(18)],
@@ -73,33 +74,37 @@ def test_prepare_frame_preserves_add_frame_payload_contract() -> None:
 
 
 def test_prepare_frame_raw_order_is_base_wrist_roi() -> None:
-    prepared = prepare_recording_frame(
+    prepared = prepare_frame(
         _sample(),
         task="task",
         height=2,
         width=2,
+        recording_mode="tcp",
     )
 
     image_bytes = 2 * 2 * 3
-    assert prepared.raw[:image_bytes] == bytes([1]) * image_bytes
-    assert prepared.raw[image_bytes:2 * image_bytes] == bytes([2]) * image_bytes
-    assert prepared.raw[2 * image_bytes:] == bytes([3]) * image_bytes
+    assert prepared[1][:image_bytes] == bytes([1]) * image_bytes
+    assert prepared[1][image_bytes : 2 * image_bytes] == bytes([2]) * image_bytes
+    assert prepared[1][2 * image_bytes :] == bytes([3]) * image_bytes
 
 
 def test_prepare_frame_raw_size_is_three_rgb_images() -> None:
-    prepared = prepare_recording_frame(
+    prepared = prepare_frame(
         _sample(),
         task="task",
         height=2,
         width=2,
+        recording_mode="tcp",
     )
 
-    assert len(prepared.raw) == 3 * 2 * 2 * 3
+    assert len(prepared[1]) == 3 * 2 * 2 * 3
 
 
 def test_prepare_frame_reuses_frozen_sample_validation() -> None:
     sample = _sample()
-    sample["action"] = [0.0] * 11
+    from dataclasses import replace
+
+    sample = replace(sample, action=(0.0,) * 11)
 
     with pytest.raises(ValueError, match="12"):
-        prepare_recording_frame(sample, task="task", height=2, width=2)
+        prepare_frame(sample, task="task", height=2, width=2, recording_mode="tcp")

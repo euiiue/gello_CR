@@ -26,7 +26,7 @@ python_base_prefix="$(sed -n '2p' <<<"${python_paths}")"
 export LD_LIBRARY_PATH="${python_base_prefix}/lib:${python_prefix}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # 项目源码。
-export PYTHONPATH="${repo_root}/src:${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${repo_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 # 启动后仍保持 OFFLINE。
 # 不自动连接机器人、不上使能、不启动 ServoJ。

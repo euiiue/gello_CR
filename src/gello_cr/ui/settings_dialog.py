@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import threading
 import traceback
 
 from PySide6.QtCore import Qt, Signal
@@ -29,32 +28,44 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gello_cr.app.settings import SETTINGS_GROUPS, OperatorSettings
-from gello_cr.devices.camera_streams import resolve_camera_streams
-from gello_cr.devices.realsense import discover_realsense_cameras
+from gello_cr.app.background import BackgroundJobs
+from gello_cr.app.settings import (
+    SETTINGS_GROUPS,
+    OperatorSettings,
+    camera_streams,
+    discover_cameras,
+)
 
 PAGE_NOTES = {
-    "机械臂": "ServoJ v/a/j 按 SDK 原值保存。关节保护对 J1–J6 生效；"
+    "机械臂": "遥操作的位移、速度与跟踪保护。底层 Servo 参数在硬件配置文件中管理。"
     "XYZ / 姿态限制仅用于笛卡尔模式，范围相对于跟随起点，不是绝对关节软限位。",
     "GELLO": "当前标定、关节方向与控制模式沿用原配置。反馈频率同时决定关节跟随循环频率。",
     "O6 动作": "编辑动作库并选择 J7 张开 / 闭合动作。仅保存参数，不发送手部动作。"
     "六列顺序：拇指弯曲、拇指侧摆、食指、中指、无名指、小指。",
     "数采与相机": "质量阈值用于标记 needs_review；机械臂停止阈值在“机械臂”页。"
     "建议保存高 480 / 宽 640，训练时再缩放；画面来源和 ROI 在“相机画面”页设置。",
+    "规划": "默认操作速度、插值间隔和实际到位容差；保存后下次启动生效。",
     "控制器连接": "连接参数在下次启动后使用；启动后仍需手动连接与使能。",
 }
 
 
 class OperatorSettingsDialog(QDialog):
     cameras_discovered = Signal(object, str)
+    saved_changes = Signal()
+    reload_requested = Signal()
 
-    def __init__(self, settings: OperatorSettings, parent=None):
+    def __init__(self, settings: OperatorSettings, parent=None, *, embedded=False):
         super().__init__(parent)
+        self._jobs = BackgroundJobs()
+        self.embedded = embedded
+        if embedded:
+            self.setWindowFlags(Qt.Widget)
         self.settings = settings
         self.saved = False
         self.setWindowTitle("参数设置")
         self.resize(1020, 780)
-        self.setMinimumSize(900, 650)
+        if not embedded:
+            self.setMinimumSize(900, 650)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
         title = QLabel("参数设置")
@@ -62,6 +73,9 @@ class OperatorSettingsDialog(QDialog):
         outer.addWidget(title)
         note = QLabel("保存后下次启动生效 · 当前会话参数保持不变")
         outer.addWidget(note)
+        outer.addWidget(
+            QLabel("Hardware Profile: " + settings.data["hardware"]["name"] + "（配置文件，只读）")
+        )
         path_label = QLabel(str(settings.path))
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         path_label.setWordWrap(True)
@@ -95,10 +109,20 @@ class OperatorSettingsDialog(QDialog):
                 self.recording_mode.setCurrentIndex(
                     self.recording_mode.findData(settings.data["dataset"]["recording_mode"])
                 )
-                form.addRow("LeRobot 记录模式", self.recording_mode)
+                form.addRow("采集状态 / 动作结构", self.recording_mode)
+                self.dataset_format = QComboBox()
+                for label, key in (
+                    ("LeRobot V3", "lerobot_v3"),
+                    ("LeRobot V2.1", "lerobot_v21"),
+                    ("HDF5", "hdf5"),
+                ):
+                    self.dataset_format.addItem(label, key)
+                self.dataset_format.setCurrentIndex(
+                    self.dataset_format.findData(settings.data["dataset"]["format"])
+                )
+                form.addRow("默认保存格式", self.dataset_format)
             for field in fields:
-                section, key = field.path.split(".")
-                value = settings.data[section][key]
+                value = field.value(settings.data)
                 values = value if field.count > 1 else [value]
                 row = QWidget()
                 row_layout = QHBoxLayout(row)
@@ -150,7 +174,7 @@ class OperatorSettingsDialog(QDialog):
         self.camera_scan_status.setWordWrap(True)
         layout.addWidget(self.camera_scan_status)
         self.camera_editors = []
-        for index, stream in enumerate(resolve_camera_streams(self.settings.data["dataset"])):
+        for index, stream in enumerate(camera_streams(self.settings.data["dataset"])):
             group = QGroupBox(f"录制窗口 {index + 1}")
             form = QFormLayout(group)
             name = QLineEdit(stream.name)
@@ -193,16 +217,12 @@ class OperatorSettingsDialog(QDialog):
         self.camera_scan_button.setEnabled(False)
         self.camera_scan_status.setText("正在读取相机列表…")
 
-        def scan():
-            try:
-                devices = discover_realsense_cameras()
-            except Exception as exc:
-                traceback.print_exception(exc)
-                self.cameras_discovered.emit([], f"{type(exc).__name__}: {exc}")
-            else:
-                self.cameras_discovered.emit(devices, "")
-
-        threading.Thread(target=scan, name="CameraDiscovery", daemon=True).start()
+        discover_cameras(
+            self._jobs,
+            lambda value, error: self.cameras_discovered.emit(
+                value or [], str(error) if error else ""
+            ),
+        )
 
     def _show_cameras(self, devices, error):
         self.camera_scan_button.setEnabled(True)
@@ -319,24 +339,26 @@ class OperatorSettingsDialog(QDialog):
         candidate = copy.deepcopy(self.settings.data)
         for fields in SETTINGS_GROUPS.values():
             for field in fields:
-                section, key = field.path.split(".")
-                candidate[section][key] = field.parse(
-                    [edit.text() for edit in self.editors[field.path]]
+                field.assign(
+                    candidate, field.parse([edit.text() for edit in self.editors[field.path]])
                 )
+        candidate["dataset"]["format"] = self.dataset_format.currentData()
         candidate["dataset"]["recording_mode"] = self.recording_mode.currentData()
         streams = [
-            {"name": name.text().strip(),
-             "serial": serial.currentText().split(" · ", 1)[0].strip(),
-             "mode": mode.currentData(),
-             "roi_norm": [float(edit.text()) for edit in roi_edits]}
+            {
+                "name": name.text().strip(),
+                "serial": serial.currentText().split(" · ", 1)[0].strip(),
+                "mode": mode.currentData(),
+                "roi_norm": [float(edit.text()) for edit in roi_edits],
+            }
             for name, serial, mode, roi_edits in self.camera_editors
         ]
         # Preserve an untouched legacy config; persist explicit slots on the first edit.
-        original = resolve_camera_streams(self.settings.data["dataset"])
-        parsed = resolve_camera_streams({"camera_streams": streams})
+        original = camera_streams(self.settings.data["dataset"])
+        parsed = camera_streams({"camera_streams": streams})
         if self.settings.data["dataset"].get("camera_streams") is not None or any(
-            (a.name, a.serial, a.mode, tuple(a.roi_norm)) !=
-            (b.name, b.serial, b.mode, tuple(b.roi_norm))
+            (a.name, a.serial, a.mode, tuple(a.roi_norm))
+            != (b.name, b.serial, b.mode, tuple(b.roi_norm))
             for a, b in zip(original, parsed, strict=True)
         ):
             candidate["dataset"]["camera_streams"] = streams
@@ -371,7 +393,11 @@ class OperatorSettingsDialog(QDialog):
             self.error_label.setText(f"保存失败：{exc}")
             return
         self.saved = True
-        self.accept()
+        self.saved_changes.emit()
+        if not self.embedded:
+            self.accept()
+        else:
+            self.error_label.setText("参数已保存；请重新启动后连接设备。")
 
     def reject(self):
         try:
@@ -390,4 +416,10 @@ class OperatorSettingsDialog(QDialog):
             != QMessageBox.Discard
         ):
             return
-        super().reject()
+        if self.embedded:
+            self.reload_requested.emit()
+        else:
+            super().reject()
+
+    def close_jobs(self, timeout=3.0):
+        self._jobs.close(timeout=timeout)

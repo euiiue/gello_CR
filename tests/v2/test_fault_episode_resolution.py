@@ -9,6 +9,7 @@ from gello_cr.core.state_machine import (
     Command,
     InvalidTransition,
     WorkflowState,
+    RecordingState,
     WorkflowStateMachine,
 )
 
@@ -43,6 +44,7 @@ def _bound_service(state, recovery):
         state_machine=WorkflowStateMachine(
             state=state,
             recovery_state=recovery,
+            recording_state=RecordingState.PENDING,
         )
     )
     recorder = Recorder()
@@ -123,8 +125,9 @@ def test_success_episode_can_be_saved_from_robot_enabled_after_home() -> None:
 
 def test_estop_from_recording_keeps_robot_enabled_recovery_target() -> None:
     machine = WorkflowStateMachine(
-        state=WorkflowState.RECORDING,
-        recovery_state=WorkflowState.RECORDING,
+        state=WorkflowState.TELEOP_RUNNING,
+        recovery_state=WorkflowState.TELEOP_RUNNING,
+        recording_state=RecordingState.PENDING,
     )
     service = ApplicationService(state_machine=machine)
     recorder = Recorder()

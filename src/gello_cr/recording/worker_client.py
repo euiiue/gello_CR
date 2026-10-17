@@ -7,8 +7,8 @@ This is the hardware-process side of the recorder bridge. It owns:
 - stderr diagnostics;
 - the permanent communication-error latch after transport/protocol failure.
 
-The worker script path is explicit so moving this class out of the root
-`lerobot_recorder.py` cannot accidentally change which script is executed.
+The worker script path is explicit so the recorder can select the packaged
+entry point or an application-provided worker without changing the protocol.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .errors import WriterError
 from .protocol import receive_packet, send_packet
 
 
-class WorkerClientError(RuntimeError):
+class WorkerClientError(WriterError):
     """Worker process/transport failure exposed to the recorder."""
 
 
@@ -36,15 +37,11 @@ class WorkerClient:
     ) -> None:
         executable = Path(python_executable).expanduser()
         if not executable.is_file():
-            raise FileNotFoundError(
-                f"LeRobot Python does not exist: {executable}"
-            )
+            raise FileNotFoundError(f"LeRobot Python does not exist: {executable}")
 
         script = Path(worker_script).expanduser().resolve()
         if not script.is_file():
-            raise FileNotFoundError(
-                f"LeRobot worker script does not exist: {script}"
-            )
+            raise FileNotFoundError(f"LeRobot worker script does not exist: {script}")
 
         parent_socket, child_socket = socket.socketpair()
         self._socket = parent_socket
@@ -112,8 +109,7 @@ class WorkerClient:
                 details = "\n".join(self._stderr_lines)
                 raise WorkerClientError(
                     f"LeRobot worker exited with code "
-                    f"{self._process.returncode}"
-                    + (f":\n{details}" if details else "")
+                    f"{self._process.returncode}" + (f":\n{details}" if details else "")
                 )
 
             previous_timeout = self._socket.gettimeout()
@@ -123,22 +119,17 @@ class WorkerClient:
                 response, _ = receive_packet(self._socket)
             except (OSError, EOFError, ValueError) as exc:
                 details = "\n".join(self._stderr_lines)
-                self._communication_error = (
-                    f"LeRobot worker communication failed: {exc}"
-                    + (f"\n{details}" if details else "")
+                self._communication_error = f"LeRobot worker communication failed: {exc}" + (
+                    f"\n{details}" if details else ""
                 )
                 # A late response must never be mistaken for the next request's
                 # acknowledgement after a timeout (there are no request IDs).
-                raise WorkerClientError(
-                    self._communication_error
-                ) from exc
+                raise WorkerClientError(self._communication_error) from exc
             finally:
                 self._socket.settimeout(previous_timeout)
 
             if not response.get("ok", False):
-                raise WorkerClientError(
-                    str(response.get("error", "Unknown worker error"))
-                )
+                raise WorkerClientError(str(response.get("error", "Unknown worker error")))
             return response
 
     def close(self) -> None:

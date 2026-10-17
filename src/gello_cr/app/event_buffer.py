@@ -1,4 +1,3 @@
-
 """Thread-safe bounded buffer for application events.
 
 ApplicationService handlers may run in worker threads. UI subscribers therefore

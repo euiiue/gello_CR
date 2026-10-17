@@ -395,6 +395,16 @@ def test_servoj_open_send_and_stop_use_servo_port() -> None:
     assert ("stop_servoJ", 22) in api.calls
 
 
+def test_movej_servo_preparation_does_not_open_native_servoj_channel():
+    api = FakeNrcApi(state=3)
+    session = _session(api, motion_mode="movej")
+
+    session.open_servoj(80.0, 195.0, 120.0)
+
+    assert api.calls == []
+    assert not session.servoj_open
+
+
 def test_movej_mode_rate_limits_and_honors_busy_warning() -> None:
     api = FakeNrcApi(state=3)
     session = _session(api, motion_mode="movej")
@@ -419,3 +429,38 @@ def test_movej_mode_rate_limits_and_honors_busy_warning() -> None:
     api.running_states = [2]
     assert not session.send_servoj(target)
     assert session.controller_job_warning
+
+
+def test_movej_busy_warning_does_not_skip_queue_stop():
+    api = FakeNrcApi(state=3)
+    stops = []
+    api.queue_motion_stop_not_power_off = lambda fd: stops.append(fd) or 0
+    session = _session(api, motion_mode="movej")
+    session.record_controller_message("warning", "job busy", 4098)
+    session._last_movej_send_time = 1.0
+
+    session.stop_motion()
+
+    assert stops == [11]
+    assert session._last_movej_send_time is None
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_native_queue_stop_failure_blocks_motion_preemption(busy):
+    from gello_cr.errors import HardwareError
+    from gello_cr.motion import MotionCoordinator, MotionExecutor, MotionSource
+
+    api = FakeNrcApi(state=3)
+    api.queue_motion_stop_not_power_off = lambda _fd: -6
+    session = _session(api, motion_mode="movej")
+    if busy:
+        session.record_controller_message("warning", "job busy", 4098)
+    motion = MotionCoordinator(MotionExecutor(lambda: session))
+    old = motion.acquire(MotionSource.TELEOP)
+
+    with pytest.raises(HardwareError, match="停止.*通信超时"):
+        motion.acquire(MotionSource.HOME, allow_preempt=True)
+
+    assert not old.active
+    assert motion.current_owner is None
+    assert "通信超时" in motion.status.error

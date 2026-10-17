@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from gello_cr.app.settings import OperatorSettings
-from teleop_runtime import TeleopConfigStore
+from gello_cr.app.config_store import TeleopConfigStore
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def settings(tmp_path):
     path = tmp_path / "teleop.json"
-    path.write_bytes((ROOT / "config/roarm_cr5_teleop.json").read_bytes())
+    path.write_bytes((ROOT / "config/workbench.json").read_bytes())
     return OperatorSettings(path, TeleopConfigStore)
 
 
@@ -85,7 +85,7 @@ def test_failed_atomic_replace_preserves_original(settings, monkeypatch):
     def fail(*args):
         raise OSError("disk write refused")
 
-    monkeypatch.setattr("teleop_runtime.os.replace", fail)
+    monkeypatch.setattr("gello_cr.app.config_store.os.replace", fail)
     with pytest.raises(OSError, match="disk write refused"):
         settings.save(candidate)
     assert settings.path.read_bytes() == original
@@ -184,7 +184,7 @@ def test_action_selection_save_reaches_both_runtime_mapping_modes(dialog):
 def test_invalid_form_stays_open_with_error_and_no_save(dialog):
     widget, _ = dialog
     original = widget.settings.path.read_bytes()
-    widget.editors["robot.servoj_vmax"][0].setText("nan")
+    widget.editors["planning.default_speed_scale"][0].setText("nan")
     widget._save()
     assert widget.isVisible() and not widget.saved
     assert "有限数" in widget.error_label.text()
@@ -204,7 +204,7 @@ def test_cancel_modified_draft_requires_explicit_discard(dialog, monkeypatch):
 
     widget, _ = dialog
     original = widget.settings.path.read_bytes()
-    widget.editors["robot.servoj_vmax"][0].setText("45")
+    widget.editors["planning.default_speed_scale"][0].setText("0.4")
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Cancel)
     widget.reject()
     assert widget.isVisible()
@@ -224,7 +224,7 @@ def test_saving_new_session_reads_parameters_without_hardware(settings):
     settings.save(candidate)
     config_dir = settings.path.parent / "config"
     config_dir.mkdir()
-    (config_dir / "roarm_cr5_teleop.json").write_text(json.dumps(candidate))
+    (config_dir / "workbench.json").write_text(json.dumps(candidate))
     operator = build_operator_application(settings.path.parent)
     try:
         assert operator.runtime.cr3a_lifecycle._robot_config().servoj_vmax == 45
@@ -260,21 +260,18 @@ def test_header_settings_save_requires_restart_and_emits_no_commands(settings):
     window.show()
     app.processEvents()
 
-    def save_form():
-        modal = app.activeModalWidget()
-        modal.editors["robot.servoj_vmax"][0].setText("45")
-        modal.buttons.button(QDialogButtonBox.Save).click()
-
     try:
-        assert window.settings_button.isEnabled()
-        QTimer.singleShot(0, save_form)
-        window.settings_button.click()
-        assert not window.connect_button.isEnabled()
-        assert not window.start_cameras_button.isEnabled()
-        assert "重新启动" in window.workflow_detail.text()
-        assert window.settings_button.isEnabled()
+        window.navigation.setCurrentRow(5)
+        app.processEvents()
+        editor = window.settings_editor
+        assert editor.isEnabled() and not editor.isWindow()
+        editor.editors["planning.default_speed_scale"][0].setText("0.4")
+        editor.buttons.button(QDialogButtonBox.Save).click()
+        assert not window.collection.connect_button.isEnabled()
+        assert not window.collection.start_cameras_button.isEnabled()
+        assert "重新启动" in window.state_headline.text()
         assert requests == []
-        assert TeleopConfigStore(settings.path).data["robot"]["servoj_vmax"] == 45
+        assert TeleopConfigStore(settings.path).data["planning"]["default_speed_scale"] == 0.4
     finally:
         window.close()
         app.processEvents()
@@ -320,8 +317,9 @@ def test_settings_disabled_when_devices_or_episode_are_active(
         settings_factory=lambda: settings,
     )
     try:
-        assert not window.settings_button.isEnabled()
-        window.settings_button.click()
+        window.navigation.setCurrentRow(5)
+        app.processEvents()
+        assert window.settings_editor is not None and not window.settings_editor.isEnabled()
         assert requests == []
     finally:
         recording.clear()
@@ -336,8 +334,9 @@ def test_running_joint_loop_dispatches_saved_action_to_fake_hand(
     import threading
     import time
 
-    from teleop_runtime import GelloFeedback, TeleopEngine
-    from test_teleop_runtime import FakeGello, FakeO6, FakeRobot
+    from gello_cr.app.runtime import TeleopRuntime as TeleopEngine
+    from gello_cr.devices.gello import GelloFeedback
+    from tests.fakes.runtime import FakeGello, FakeO6, FakeRobot
 
     candidate = copy.deepcopy(settings.data)
     candidate["gello"]["startup_settle_s"] = 0

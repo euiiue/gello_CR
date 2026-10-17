@@ -46,4 +46,4 @@ def test_window_reports_synchronous_submit_failure_locally() -> None:
 
     assert "try:" in method
     assert "self._command_port.submit(" in method
-    assert "LOCAL ERROR" in method
+    assert "ERROR ·" in method

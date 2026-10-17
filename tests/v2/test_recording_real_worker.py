@@ -1,5 +1,6 @@
 """Full recorder -> Unix IPC -> real LeRobot/MP4 -> validation, synthetic inputs."""
 import sys
+import os
 import time
 from pathlib import Path
 import json
@@ -7,10 +8,16 @@ import json
 import numpy as np
 import pytest
 
-pytest.importorskip('lerobot.datasets.lerobot_dataset')
+WORKER_PYTHON = os.environ.get('GELLO_TEST_V3_PYTHON', sys.executable)
+if 'GELLO_TEST_V3_PYTHON' not in os.environ:
+    pytest.importorskip('lerobot.datasets.lerobot_dataset')
 pytest.importorskip('av')
 
-from gello_cr.recording.episode_recorder import LeRobotEpisodeRecorder
+from types import SimpleNamespace
+from gello_cr.recording.frame import CaptureFrame
+from gello_cr.recording.schema import IMAGE_KEYS
+from gello_cr.recording.session import RecordingSession
+from gello_cr.recording.writers.lerobot_v3 import LeRobotV3Writer
 from gello_cr.recording.validate_dataset import validate_dataset
 
 
@@ -21,12 +28,11 @@ def test_real_worker_success_failure_discard_and_finalize(tmp_path, monkeypatch,
     image = np.full((224,224,3), 90, dtype=np.uint8)
     def sample():
         ts = time.monotonic()
-        return {'timestamp': ts, 'recording_mode': mode, 'observation_state': [0.0]*state_dim, 'action': [0.0]*12,
-                'image_base_rgb': image, 'image_wrist_rgb': image, 'image_roi_rgb': image,
-                'quality': {'wrist_timestamp': ts, 'base_timestamp': ts,
-                            'wrist_age_s': 0., 'base_age_s': 0., 'camera_skew_s': 0.}}
-    recorder = LeRobotEpisodeRecorder(sample_provider=sample, event_callback=lambda *args: None,
-        worker_python=sys.executable, repo_prefix='local/offline-test')
+        return CaptureFrame(ts, (0.,)*state_dim, (0.,)*12, {key: image for key in IMAGE_KEYS},
+            metadata={"recording_mode": mode, "quality": {"wrist_timestamp": ts,
+                "base_timestamp": ts, "wrist_age_s": 0., "base_age_s": 0., "camera_skew_s": 0.}})
+    recorder = RecordingSession(SimpleNamespace(capture=sample),
+        lambda: LeRobotV3Writer(WORKER_PYTHON, 'local/offline-test'), event_callback=lambda *args: None)
     counts = []
     for outcome in ('success', 'failure', 'discard'):
         recorder.start_episode('synthetic offline test', str(tmp_path), metadata={'synthetic': True})
@@ -60,13 +66,13 @@ def test_native_resolution_and_switch_root_without_restarting(tmp_path):
 
     def sample():
         ts = time.monotonic()
-        return {'timestamp': ts, 'observation_state': [0.] * 18, 'action': [0.] * 12,
-                'image_base_rgb': image, 'image_wrist_rgb': image, 'image_roi_rgb': image,
-                'quality': {'wrist_timestamp': ts, 'base_timestamp': ts,
-                            'wrist_age_s': 0., 'base_age_s': 0., 'camera_skew_s': 0.}}
+        return CaptureFrame(ts, (0.,)*18, (0.,)*12, {key: image for key in IMAGE_KEYS},
+            metadata={"quality": {"wrist_timestamp": ts, "base_timestamp": ts,
+                                  "wrist_age_s": 0., "base_age_s": 0., "camera_skew_s": 0.}})
 
-    recorder = LeRobotEpisodeRecorder(sample, lambda *args: None, sys.executable,
-                                     'local/native', image_size=(480, 640))
+    recorder = RecordingSession(SimpleNamespace(capture=sample),
+        lambda: LeRobotV3Writer(WORKER_PYTHON, 'local/native'),
+        event_callback=lambda *args: None, image_size=(480,640))
     roots = []
     try:
         for parent in (tmp_path / 'first folder', tmp_path / 'second folder'):

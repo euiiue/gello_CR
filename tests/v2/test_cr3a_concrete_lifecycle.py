@@ -52,6 +52,9 @@ class Store:
         }
     }
 
+    def deployment_data(self):
+        return self.data
+
 
 class Engine:
     def __init__(self):

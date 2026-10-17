@@ -30,8 +30,10 @@ def discover_realsense_cameras() -> list[dict[str, str]]:
     import pyrealsense2 as rs
 
     return [
-        {"serial": device.get_info(rs.camera_info.serial_number),
-         "name": device.get_info(rs.camera_info.name)}
+        {
+            "serial": device.get_info(rs.camera_info.serial_number),
+            "name": device.get_info(rs.camera_info.name),
+        }
         for device in rs.context().query_devices()
     ]
 
@@ -51,10 +53,7 @@ class RealSenseRgbConfig:
             raise ValueError("RealSense width/height must be positive")
         if int(self.fps) <= 0:
             raise ValueError("RealSense fps must be positive")
-        if (
-            not math.isfinite(float(self.poll_sleep_s))
-            or float(self.poll_sleep_s) <= 0
-        ):
+        if not math.isfinite(float(self.poll_sleep_s)) or float(self.poll_sleep_s) <= 0:
             raise ValueError("RealSense poll_sleep_s must be positive and finite")
 
 
@@ -136,11 +135,11 @@ class RealSenseRgbDevice:
 
         try:
             pipeline.start(stream_config)
-        except Exception:
+        except Exception as exc:
             try:
                 pipeline.stop()
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                exc.add_note(f"Camera cleanup after failed start: {cleanup_error}")
             raise
 
         self._pipeline = pipeline
@@ -166,9 +165,7 @@ class RealSenseRgbDevice:
         snapshot = self.latest()
         if snapshot is None:
             self.close()
-            raise RuntimeError(
-                f"RealSense {self.config.serial} produced no valid RGB frame"
-            )
+            raise RuntimeError(f"RealSense {self.config.serial} produced no valid RGB frame")
         return snapshot
 
     def latest(self) -> CameraSnapshot | None:
@@ -243,14 +240,12 @@ class RealSenseRgbDevice:
                 )
                 if bgr.shape != expected_shape:
                     raise RuntimeError(
-                        "RealSense RGB shape mismatch: "
-                        f"expected {expected_shape}, got {bgr.shape}"
+                        f"RealSense RGB shape mismatch: expected {expected_shape}, got {bgr.shape}"
                     )
 
                 if bgr.dtype != np.uint8:
                     raise RuntimeError(
-                        "RealSense RGB dtype mismatch: "
-                        f"expected uint8, got {bgr.dtype}"
+                        f"RealSense RGB dtype mismatch: expected uint8, got {bgr.dtype}"
                     )
 
                 rgb = np.ascontiguousarray(bgr[:, :, ::-1])
@@ -268,6 +263,5 @@ class RealSenseRgbDevice:
 
         except Exception as exc:
             self._set_error(
-                f"RealSense {self.config.serial} RGB worker failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"RealSense {self.config.serial} RGB worker failed: {type(exc).__name__}: {exc}"
             )

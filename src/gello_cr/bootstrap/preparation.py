@@ -1,4 +1,3 @@
-
 """Explicit preparation commands for auxiliary devices and cameras."""
 
 from __future__ import annotations
@@ -31,19 +30,13 @@ class OperatorReadinessProvider:
             camera_error = self._runtime.sample_source.readiness_error()
 
         return {
-            "master_type": str(
-                getattr(master, "master_type", "unknown")
-            ),
-            "master_connected": bool(
-                getattr(master, "connected", False)
-            ),
-            "o6_connected": bool(
-                getattr(o6, "connected", False)
-            ),
+            "master_type": str(getattr(master, "master_type", "unknown")),
+            "master_connected": bool(getattr(master, "connected", False)),
+            "master_error": str(getattr(master, "error", "") or ""),
+            "o6_error": str(getattr(o6, "error", "") or ""),
+            "o6_connected": bool(getattr(o6, "connected", False)),
             "cameras_running": bool(camera.running),
-            "camera_frames_ready": bool(
-                camera.running and not camera_error
-            ),
+            "camera_frames_ready": bool(camera.running and not camera_error),
             "camera_error": camera_error,
         }
 
@@ -64,7 +57,7 @@ class OperatorPreparationBindings:
         self._recorder = recorder
         self._cameras = cameras
 
-    def install(self) -> "OperatorPreparationBindings":
+    def install(self) -> OperatorPreparationBindings:
         self._service.set_handler(
             Command.PREPARE_DEVICES,
             self._prepare_devices,
@@ -83,12 +76,7 @@ class OperatorPreparationBindings:
         self,
         _payload: Mapping[str, Any],
     ) -> Any:
-        master = self._teleop_engine.roarm
-        o6 = self._teleop_engine.o6
-        if (
-            bool(getattr(master, "connected", False))
-            and bool(getattr(o6, "connected", False))
-        ):
+        if self._teleop_engine.devices_connected():
             return None
         return self._teleop_engine.connect_devices()
 
@@ -105,11 +93,7 @@ class OperatorPreparationBindings:
     ) -> None:
         dataset = self._recorder.snapshot()
         if bool(dataset.get("episode_active", False)):
-            raise RuntimeError(
-                "Episode 正在录制，必须先结束并保存/丢弃后再停止相机"
-            )
-        if int(dataset.get("buffered_frames", 0) or 0) > 0:
-            raise RuntimeError(
-                "Episode 存在待处理帧，必须先保存或丢弃后再停止相机"
-            )
+            raise RuntimeError("Episode 正在录制，必须先结束并保存/丢弃后再停止相机")
+        if dataset.get("episode_pending", bool(dataset.get("buffered_frames"))):
+            raise RuntimeError("Episode 存在待处理帧，必须先保存或丢弃后再停止相机")
         self._cameras.stop()

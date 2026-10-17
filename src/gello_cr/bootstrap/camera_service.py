@@ -102,9 +102,10 @@ class CameraPollingService:
             thread.join(timeout=2.0)
         errors = []
         if thread is not None and thread.is_alive():
-            errors.append(TimeoutError("Camera bridge thread did not stop"))
-        else:
-            self._thread = None
+            raise ExceptionGroup(
+                "Camera shutdown incomplete", [TimeoutError("Camera bridge thread did not stop")]
+            )
+        self._thread = None
         for serial, camera in self._cameras.items():
             try:
                 camera.close()

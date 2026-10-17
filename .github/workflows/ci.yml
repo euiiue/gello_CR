@@ -1,0 +1,23 @@
+name: Offline regression
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      HF_HUB_OFFLINE: '1'
+      HF_DATASETS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[ui,dev,hdf5,data-validation]'
+      - run: python -m compileall -q src scripts tools examples
+      - run: ruff check src scripts tools examples
+      - run: ruff format --check src scripts tools examples
+      - run: pytest -q --tb=short
+      - run: git diff --check

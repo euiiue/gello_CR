@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from gello_cr.core.state_machine import Command, WorkflowState
 
 
-class EventLevel(str, Enum):
+class EventLevel(StrEnum):
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -24,6 +26,5 @@ class AppEvent:
     state: WorkflowState
     message: str
     command: Command | None = None
-    details: Mapping[str, Any] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    occurred_at: float = field(default_factory=time.time)
+    details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))

@@ -1,5 +1,4 @@
-
-"""Executable entry point for the new PySide6 operator UI.
+"""Production entry point for Robot Learning Workbench.
 
 Examples:
 
@@ -16,9 +15,11 @@ import os
 import sys
 from pathlib import Path
 
+from gello_cr import __version__
 from gello_cr.app.settings import OperatorSettings
 from gello_cr.bootstrap import build_operator_application
 from gello_cr.core.state_machine import WorkflowState
+from gello_cr.logging_config import configure_logging
 
 
 def _default_repo_root() -> Path:
@@ -27,7 +28,7 @@ def _default_repo_root() -> Path:
         return Path(configured).expanduser().resolve()
 
     cwd = Path.cwd().resolve()
-    if (cwd / "config" / "roarm_cr5_teleop.json").is_file():
+    if (cwd / "config" / "workbench.json").is_file():
         return cwd
 
     package_root = Path(__file__).resolve().parents[3]
@@ -36,7 +37,7 @@ def _default_repo_root() -> Path:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="GELLO / CR3A / O6 PySide6 operator UI",
+        description="Robot Learning Workbench",
     )
     parser.add_argument(
         "--repo-root",
@@ -59,9 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(args.repo_root).expanduser().resolve()
 
     operator = build_operator_application(repo_root)
+    configure_logging(operator.runtime.store.data["logging"]["level"])
     try:
         if operator.backend.service.state is not WorkflowState.OFFLINE:
-            raise RuntimeError("new operator application must start OFFLINE")
+            raise RuntimeError("Workbench must start OFFLINE")
         if operator.cameras.running:
             raise RuntimeError("camera service unexpectedly started")
 
@@ -69,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime = operator.runtime
             master_type = str(runtime.store.data["master"]["type"])
             print(
-                "Phase 6.5 operator bootstrap check: PASS\n"
+                f"Robot Learning Workbench v{__version__}\n"
                 f"repo_root={repo_root}\n"
                 f"workflow={operator.backend.service.state.name}\n"
                 f"master={master_type}\n"
@@ -83,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError as exc:
             raise SystemExit(
                 "PySide6 is not installed. Install the project UI extra "
-                "before launching the new operator window."
+                "before launching the Workbench window."
             ) from exc
 
         from gello_cr.ui.session import create_operator_window
@@ -92,31 +94,37 @@ def main(argv: list[str] | None = None) -> int:
         window = create_operator_window(
             operator.backend,
             close_callback=operator.close,
+            refresh_ms=operator.runtime.store.data["ui"]["refresh_ms"],
             settings_factory=lambda: OperatorSettings(
                 operator.runtime.store.path, type(operator.runtime.store)
             ),
         )
 
         dataset_cfg = operator.runtime.store.data["dataset"]
-        window.task_edit.setText(str(dataset_cfg["task"]))
-        window.root_edit.setText(str(dataset_cfg["root"]))
+        window.collection.task_edit.setText(str(dataset_cfg.get("task_name", "collection")))
+        window.collection.description_edit.setText(str(dataset_cfg["task"]))
+        window.collection.root_edit.setText(
+            str(operator.runtime.store.resolve_path(dataset_cfg["root"]))
+        )
 
         def persist_dataset_root():
-            path = window.root_edit.text().strip()
+            path = window.collection.root_edit.text().strip()
             if not path:
                 window.statusBar().showMessage("数据集父目录不能为空")
                 return
-            path = str(Path(path).expanduser().resolve())
+            path = str(operator.runtime.store.resolve_path(path))
             try:
-                settings = OperatorSettings(operator.runtime.store.path, type(operator.runtime.store))
+                settings = OperatorSettings(
+                    operator.runtime.store.path, type(operator.runtime.store)
+                )
                 if settings.data["dataset"]["root"] != path:
                     settings.data["dataset"]["root"] = path
                     settings.save(settings.data)
-                window.root_edit.setText(path)
+                window.collection.root_edit.setText(path)
             except Exception as exc:
                 window.statusBar().showMessage(f"默认保存目录未能写入配置：{exc}")
 
-        window.root_edit.editingFinished.connect(persist_dataset_root)
+        window.collection.root_edit.editingFinished.connect(persist_dataset_root)
         window.statusBar().showMessage(
             "OFFLINE · cameras stopped · no hardware auto-connect",
             15000,

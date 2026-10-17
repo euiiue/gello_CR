@@ -1,5 +1,6 @@
-
 """Runtime construction boundaries for the staged V2 migration."""
+
+from gello_cr.recording.source import CR3O6CaptureSource
 
 from .camera_service import (
     CameraPollingService,
@@ -20,7 +21,6 @@ from .runtime_factory import (
     RuntimeConstructors,
     RuntimeFactoryPaths,
 )
-from .sample_source import RecordingSampleSource
 
 __all__ = [
     "CameraPollingService",
@@ -31,7 +31,7 @@ __all__ = [
     "OperatorApplication",
     "OperatorPreparationBindings",
     "OperatorReadinessProvider",
-    "RecordingSampleSource",
+    "CR3O6CaptureSource",
     "RuntimeConstructors",
     "RuntimeFactoryPaths",
     "build_operator_application",

@@ -1,11 +1,11 @@
 """GELLO master-device adapter.
 
 This module owns all GELLO/Dynamixel-specific import and I/O details.  The rest
-of the V2 application consumes only ``MasterDevice`` snapshots.
+of the application consumes only ``MasterDevice`` snapshots.
 
 Important semantic detail:
 - GELLO channels 1..6 are arm joint angles in radians.
-- GELLO channel 7 is mapped by the legacy ``DynamixelRobot`` into a normalized
+- GELLO channel 7 is mapped by ``DynamixelRobot`` into a normalized
   gripper scalar in [0, 1]; it is therefore exposed as ``auxiliary["gripper"]``
   rather than pretending to be a seventh radian joint.
 
@@ -82,7 +82,7 @@ class GelloConfig:
 
 
 class GelloDevice:
-    """Read-only GELLO adapter implementing the V2 master-device contract."""
+    """Read-only GELLO adapter implementing the master-device contract."""
 
     def __init__(
         self,
@@ -140,7 +140,7 @@ class GelloDevice:
 
         self.close()
 
-        factory = self._robot_factory or self._load_legacy_robot_factory()
+        factory = self._robot_factory or self._load_robot_factory()
         try:
             self._robot = factory(
                 joint_ids=self.config.joint_ids,
@@ -200,7 +200,7 @@ class GelloDevice:
         if robot is not None:
             robot.close()
 
-    def _load_legacy_robot_factory(self) -> RobotFactory:
+    def _load_robot_factory(self) -> RobotFactory:
         """Load the current nested GELLO implementation without hardcoded paths."""
 
         if self.config.software_root:
@@ -221,6 +221,11 @@ class GelloDevice:
                 "Install GELLO or configure gello.software_root."
             ) from exc
 
+        if not callable(getattr(DynamixelRobot, "get_joint_state_sample", None)):
+            raise RuntimeError(
+                "GELLO SDK must expose get_joint_state_sample() with physical bus timestamps; "
+                "use the bundled vendor/gello SDK or update the configured software_root."
+            )
         return DynamixelRobot
 
     def _run(self) -> None:
@@ -229,17 +234,29 @@ class GelloDevice:
 
         try:
             while not self._stop.is_set():
-                raw = self._robot.get_joint_state()
+                sample_reader = getattr(self._robot, "get_joint_state_sample", None)
+                if not callable(sample_reader):
+                    raise RuntimeError(
+                        "GELLO SDK lacks get_joint_state_sample() with physical bus timestamps"
+                    )
+                sample = sample_reader()
+                if sample is None:
+                    self._stop.wait(period)
+                    continue
+                raw, timestamp = sample
+                timestamp = float(timestamp)
+                now = time.monotonic()
+                if not math.isfinite(timestamp) or timestamp > now:
+                    raise RuntimeError("GELLO physical sample timestamp is invalid")
+                if now - timestamp > self.config.feedback_timeout_s:
+                    raise RuntimeError("GELLO physical sample timed out")
                 values = tuple(float(value) for value in raw)
 
                 if len(values) != 7:
-                    raise RuntimeError(
-                        f"GELLO feedback must contain 7 values, got {len(values)}"
-                    )
+                    raise RuntimeError(f"GELLO feedback must contain 7 values, got {len(values)}")
                 if any(not math.isfinite(value) for value in values):
                     raise RuntimeError("GELLO feedback contains non-finite values")
 
-                timestamp = time.monotonic()
                 arm = values[:6]
                 gripper = float(values[6])
 
@@ -266,7 +283,121 @@ class GelloDevice:
         except Exception as exc:
             if not self._stop.is_set():
                 with self._lock:
-                    self._error = (
-                        f"GELLO feedback thread failed: {type(exc).__name__}: {exc}"
-                    )
+                    self._error = f"GELLO feedback thread failed: {type(exc).__name__}: {exc}"
                 self._ready.set()
+
+
+@dataclass(frozen=True)
+class GelloFeedback:
+    """Joint and auxiliary feedback consumed by motion controllers."""
+
+    timestamp: float
+    joints_rad: tuple[float, float, float, float, float, float, float]
+
+    @property
+    def arm_joints_rad(self) -> tuple[float, float, float, float, float, float]:
+        return self.joints_rad[:6]
+
+    @property
+    def gripper(self) -> float:
+        return float(self.joints_rad[6])
+
+    @property
+    def joints(self) -> tuple[float, float, float, float]:
+        return self.joints_rad[:4]
+
+
+class GelloController:
+    """Expose GELLO joint feedback using the device snapshot contract."""
+
+    master_type = "gello"
+    passive = True
+
+    def __init__(
+        self,
+        port: str,
+        software_root: str,
+        joint_ids: Sequence[int],
+        joint_offsets: Sequence[float],
+        joint_signs: Sequence[int],
+        gripper_config: Sequence[float],
+        baudrate: int = 57600,
+        feedback_hz: float = 20.0,
+        feedback_timeout_s: float = 0.5,
+    ):
+        self.port = str(port)
+        self.software_root = str(software_root)
+        self.joint_ids = tuple(int(value) for value in joint_ids)
+        self.joint_offsets = tuple(float(value) for value in joint_offsets)
+        self.joint_signs = tuple(int(value) for value in joint_signs)
+        self.gripper_config = tuple(gripper_config)
+        self.baudrate = int(baudrate)
+        self.feedback_hz = float(feedback_hz)
+        self.feedback_timeout_s = float(feedback_timeout_s)
+
+        if len(self.gripper_config) != 3:
+            raise ValueError("GELLO gripper_config 必须包含 ID/open/close 三个值")
+
+        config = GelloConfig(
+            port=self.port,
+            software_root=self.software_root,
+            joint_ids=self.joint_ids,
+            joint_offsets=self.joint_offsets,
+            joint_signs=self.joint_signs,
+            gripper_config=(
+                int(self.gripper_config[0]),
+                float(self.gripper_config[1]),
+                float(self.gripper_config[2]),
+            ),
+            baudrate=self.baudrate,
+            feedback_hz=self.feedback_hz,
+            feedback_timeout_s=self.feedback_timeout_s,
+        )
+        self._device = GelloDevice(config)
+
+    @property
+    def io_alive(self) -> bool:
+        return self._device.io_alive
+
+    @property
+    def connected(self) -> bool:
+        return self._device.connected
+
+    @property
+    def error(self) -> str:
+        return self._device.error
+
+    @staticmethod
+    def _feedback_from_snapshot(snapshot: Any) -> GelloFeedback:
+        arm = tuple(float(value) for value in snapshot.joints.positions_rad)
+        if len(arm) != 6:
+            raise RuntimeError("GELLO arm feedback must contain 6 joints")
+        try:
+            gripper = float(snapshot.auxiliary["gripper"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("GELLO feedback is missing auxiliary gripper") from exc
+        return GelloFeedback(
+            timestamp=float(snapshot.timestamp),
+            joints_rad=(
+                arm[0],
+                arm[1],
+                arm[2],
+                arm[3],
+                arm[4],
+                arm[5],
+                gripper,
+            ),
+        )
+
+    def latest(self) -> GelloFeedback | None:
+        snapshot = self._device.latest()
+        if snapshot is None:
+            return None
+        return self._feedback_from_snapshot(snapshot)
+
+    def connect(self, timeout: float = 5.0) -> GelloFeedback:
+        return self._feedback_from_snapshot(self._device.connect(timeout=float(timeout)))
+
+    def close(self, hold: bool = False) -> None:
+        del hold
+        self._device.close()

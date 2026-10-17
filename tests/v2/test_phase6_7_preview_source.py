@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 
-from gello_cr.bootstrap.sample_source import RecordingSampleSource
+from gello_cr.recording.source import CR3O6CaptureSource
 
 
 class Engine:
@@ -14,8 +14,8 @@ class Engine:
 
 
 def _source():
-    return RecordingSampleSource(
-        Engine(),
+    return CR3O6CaptureSource(
+        Engine().dataset_sample,
         {
             "camera_max_age_s": 0.5,
             "camera_max_skew_s": 0.1,

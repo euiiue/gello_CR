@@ -1,47 +1,43 @@
-"""Recording/data-contract helpers."""
+"""Format-independent dataset capture and recording lifecycle."""
 
-from .episode_recorder import LeRobotEpisodeRecorder
-from .frame import (
-    PreparedRecordingFrame,
-    prepare_recording_frame,
-    resize_rgb_for_openpi,
+from .errors import (
+    CaptureValidationError,
+    DatasetFinalizeError,
+    RecordingError,
+    UnsupportedDatasetFormat,
+    WriterError,
+    WriterStateError,
 )
-from .image_processing import RoiCrop, crop_normalized_roi, normalized_roi_bounds
-from .protocol import (
-    MAX_HEADER_SIZE,
-    MAX_RAW_SIZE,
-    read_exact,
-    receive_packet,
-    send_packet,
+from .formats import DatasetFormat, DatasetWriterConfig
+from .frame import CaptureFrame
+from .metadata import (
+    DatasetSessionMetadata,
+    EpisodeMetadata,
+    EpisodeOutcome,
+    EpisodeResult,
+    build_dataset_name,
 )
-from .schema import (
-    LEROBOT_IMAGE_FEATURE_KEYS,
-    SAMPLE_IMAGE_KEYS,
-    dataset_features,
-    validate_recording_sample,
-)
-from .worker_client import WorkerClient, WorkerClientError
-from .worker_service import WorkerDatasetService, run_worker
+from .schema import RecordingSchema, recording_schema
+from .session import RecordingSession
+from .writers.base import DatasetWriter
 
 __all__ = [
-    "LEROBOT_IMAGE_FEATURE_KEYS",
-    "LeRobotEpisodeRecorder",
-    "MAX_HEADER_SIZE",
-    "MAX_RAW_SIZE",
-    "PreparedRecordingFrame",
-    "RoiCrop",
-    "SAMPLE_IMAGE_KEYS",
-    "WorkerClient",
-    "WorkerClientError",
-    "WorkerDatasetService",
-    "crop_normalized_roi",
-    "dataset_features",
-    "normalized_roi_bounds",
-    "prepare_recording_frame",
-    "read_exact",
-    "receive_packet",
-    "resize_rgb_for_openpi",
-    "run_worker",
-    "send_packet",
-    "validate_recording_sample",
+    "CaptureFrame",
+    "DatasetFormat",
+    "DatasetWriterConfig",
+    "RecordingSchema",
+    "recording_schema",
+    "RecordingSession",
+    "DatasetWriter",
+    "DatasetSessionMetadata",
+    "EpisodeMetadata",
+    "EpisodeOutcome",
+    "EpisodeResult",
+    "build_dataset_name",
+    "RecordingError",
+    "CaptureValidationError",
+    "WriterError",
+    "WriterStateError",
+    "DatasetFinalizeError",
+    "UnsupportedDatasetFormat",
 ]

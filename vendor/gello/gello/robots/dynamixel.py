@@ -108,7 +108,18 @@ class DynamixelRobot(Robot):
         return len(self._joint_ids)
 
     def get_joint_state(self) -> np.ndarray:
-        pos = (self._driver.get_joints() - self._joint_offsets) * self._joint_signs
+        return self._calibrate_joint_state(self._driver.get_joints())
+
+    def get_joint_state_sample(self):
+        """Calibrated joints with the timestamp of the successful bus read."""
+        sample = self._driver.get_joint_sample()
+        if sample is None:
+            return None
+        positions, timestamp = sample
+        return self._calibrate_joint_state(positions), timestamp
+
+    def _calibrate_joint_state(self, positions) -> np.ndarray:
+        pos = (positions - self._joint_offsets) * self._joint_signs
         assert len(pos) == self.num_dofs()
 
         if self.gripper_open_close is not None:

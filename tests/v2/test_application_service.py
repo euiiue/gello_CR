@@ -51,7 +51,9 @@ def test_failed_normal_handler_leaves_state_unchanged() -> None:
 
 
 def test_save_failure_keeps_recording_state() -> None:
-    service = _service_at(WorkflowState.RECORDING)
+    service = _service_at(WorkflowState.TELEOP_RUNNING)
+    from gello_cr.core.state_machine import RecordingState
+    service._state_machine.recording_state = RecordingState.PENDING
 
     def fail(_payload):
         raise IOError("disk full")
@@ -61,7 +63,7 @@ def test_save_failure_keeps_recording_state() -> None:
     with pytest.raises(IOError, match="disk full"):
         service.dispatch(Command.SAVE_SUCCESS)
 
-    assert service.state is WorkflowState.RECORDING
+    assert service.state is WorkflowState.TELEOP_RUNNING
 
 
 def test_invalid_transition_never_calls_handler() -> None:
@@ -110,7 +112,7 @@ def test_failed_emergency_handler_still_leaves_service_in_estop() -> None:
 
 
 def test_estop_reset_from_recording_never_auto_resumes_teleop() -> None:
-    service = _service_at(WorkflowState.RECORDING)
+    service = _service_at(WorkflowState.TELEOP_RUNNING)
 
     service.dispatch(Command.EMERGENCY_STOP)
     assert service.state is WorkflowState.ESTOP

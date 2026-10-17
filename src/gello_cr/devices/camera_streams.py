@@ -1,11 +1,11 @@
-"""Configuration of the three preview/LeRobot image slots (no device I/O)."""
+"""Configuration of the three preview/capture image slots (no device I/O)."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
 
-from gello_cr.recording.schema import LEROBOT_IMAGE_FEATURE_KEYS, SAMPLE_IMAGE_KEYS
+from gello_cr.recording.schema import IMAGE_KEYS
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +55,6 @@ def resolve_camera_streams(dataset: dict) -> tuple[CameraStreamConfig, ...]:
 
 def camera_stream_metadata(streams: tuple[CameraStreamConfig, ...]) -> list[dict]:
     return [
-        dict(asdict(stream), sample_key=sample_key, feature_key=feature_key)
-        for stream, sample_key, feature_key in zip(
-            streams, SAMPLE_IMAGE_KEYS, LEROBOT_IMAGE_FEATURE_KEYS, strict=True
-        )
+        dict(asdict(stream), image_key=image_key)
+        for stream, image_key in zip(streams, IMAGE_KEYS, strict=True)
     ]

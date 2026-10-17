@@ -19,7 +19,9 @@ from collections.abc import Mapping
 from typing import Any
 
 MAX_HEADER_SIZE = 4 * 1024 * 1024
-MAX_RAW_SIZE = 16 * 1024 * 1024
+# Match the largest configured three-stream RGB frame without removing the wire bound.
+MAX_IMAGE_DIMENSION = 2160
+MAX_RAW_SIZE = 3 * MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION * 3
 
 
 def read_exact(sock: socket.socket, size: int) -> bytes:

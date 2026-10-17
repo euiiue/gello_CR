@@ -194,3 +194,29 @@ def test_failed_third_camera_closes_all_streams():
         service.start()
     assert all(not camera.connected for camera in cameras.values())
     assert source.base is source.wrist is source.roi is None
+
+
+def test_camera_stop_preserves_streams_until_bridge_has_exited():
+    import threading
+
+    service, wrist, base, source = _service()
+    service.start()
+    entered, release = threading.Event(), threading.Event()
+    latest = base.latest
+
+    def blocked_latest():
+        entered.set()
+        release.wait(5)
+        return latest()
+
+    base.latest = blocked_latest
+    try:
+        assert entered.wait(1)
+        with pytest.raises(ExceptionGroup, match="Camera shutdown incomplete"):
+            service.stop()
+        assert wrist.connected and base.connected
+        assert source.base is not None
+    finally:
+        release.set()
+        service.stop()
+    assert not wrist.connected and not base.connected

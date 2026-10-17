@@ -49,10 +49,13 @@ CFG = {
 }
 
 
-class Store:
+from gello_cr.app.config_store import TeleopConfigStore, DEFAULT_CONFIG, _deep_merge
+
+
+class Store(TeleopConfigStore):
     def __init__(self, path):
         self.path = path
-        self.data = CFG
+        self.data = _deep_merge(DEFAULT_CONFIG, CFG)
 
 
 class Passive:
@@ -93,8 +96,8 @@ def constructors():
         Inverse3Controller=Passive,
         GelloController=Passive,
         O6Controller=Passive,
-        TeleopEngine=Engine,
-        LeRobotEpisodeRecorder=Recorder,
+        TeleopRuntime=Engine,
+        RecordingSession=Recorder,
         Cr3aDevice=Cr3a,
         RealSenseRgbDevice=Camera,
     )
@@ -113,6 +116,8 @@ def test_factory_builds_gello_runtime_without_connecting_hardware(tmp_path) -> N
     ).build()
 
     assert runtime.master_controller is runtime.gello_controller
+    assert runtime.roarm_controller is None
+    assert runtime.inverse3_controller is None
     assert runtime.teleop_engine.attached == []
     assert runtime.cr3a_lifecycle.device is None
     assert runtime.cr3a_lifecycle.session is None
@@ -183,7 +188,7 @@ def test_factory_uses_explicit_data_python_environment(tmp_path, monkeypatch) ->
         constructors=constructors(),
     ).build()
 
-    assert runtime.recorder.kwargs['worker_python'] == '/tmp/lerobot-python'
+    assert runtime.recorder.session.kwargs['writer_factory']().worker_python == '/tmp/lerobot-python'
 
 
 def test_runtime_exposes_application_lifecycle_callbacks(tmp_path) -> None:
@@ -205,3 +210,33 @@ def test_runtime_exposes_application_lifecycle_callbacks(tmp_path) -> None:
     assert callable(callbacks.power_off)
     assert callable(callbacks.reset_fault)
     assert callable(callbacks.reset_estop)
+
+
+def test_runtime_keeps_devices_open_until_motion_producers_stop():
+    from types import SimpleNamespace
+    import pytest
+    from gello_cr.bootstrap.runtime_factory import ConcreteRuntime
+
+    stopped = False
+    closed = []
+
+    def stop_motion(**kwargs):
+        if not stopped:
+            raise TimeoutError("motion producer still running")
+
+    runtime = ConcreteRuntime(
+        paths=None, store=None, roarm_controller=None, inverse3_controller=None,
+        gello_controller=SimpleNamespace(close=lambda **kw: closed.append("gello")),
+        master_controller=None, o6_controller=SimpleNamespace(close=lambda: closed.append("o6")),
+        teleop_engine=SimpleNamespace(shutdown=stop_motion), sample_source=None,
+        recorder=None, camera_devices={},
+        cr3a_lifecycle=SimpleNamespace(
+            shutdown_power=lambda: closed.append("power"),
+            disconnect=lambda: closed.append("connection")),
+    )
+    with pytest.raises(ExceptionGroup, match="Runtime shutdown incomplete"):
+        runtime.close()
+    assert closed == []
+    stopped = True
+    runtime.close()
+    assert closed == ["gello", "o6", "power", "connection"]

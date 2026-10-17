@@ -4,15 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gello-cr-teleop"
-version = "0.1.0"
-description = "Modular teleoperation and LeRobot data collection for GELLO/CR-class robots"
+version = "1.0.0"
+description = "Robot Learning Workbench for CR3, O6 and GELLO"
 requires-python = ">=3.12"
-dependencies = ["numpy>=1.26", "opencv-python>=4.8", "pyserial>=3.5"]
+dependencies = ["numpy>=1.26", "opencv-python>=4.8", "pyserial>=3.5", "pyarrow>=15"]
+
+[project.scripts]
+gello-replay = "gello_cr.cli.replay_trajectory:main"
 
 [project.optional-dependencies]
 ui = ["PySide6-Essentials>=6.7"]
 dagger = ["websockets>=14", "PyYAML>=6", "msgpack>=1.0.5"]
-data-validation = ["pyarrow>=15", "av>=12", "pandas>=2"]
+data-validation = ["pyarrow>=15", "av>=15,<16", "pandas>=2", "h5py>=3.10"]
+hdf5 = ["h5py>=3.10"]
+alternative-masters = ["websocket-client>=1.8"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [tool.setuptools]
@@ -23,11 +28,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests", "test_teleop_runtime.py"]
+testpaths = ["tests"]
+addopts = "-m 'not hardware'"
+markers = ["hardware: explicitly selected real-device acceptance tests"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

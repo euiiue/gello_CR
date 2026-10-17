@@ -23,18 +23,16 @@ def test_main_window_never_calls_camera_or_runtime_objects() -> None:
 
 
 def test_main_window_submits_preparation_commands() -> None:
-    source = _source("src/gello_cr/ui/main_window.py")
-
+    source = _source("src/gello_cr/ui/pages/collection.py")
     assert "Command.PREPARE_DEVICES" in source
     assert "Command.START_CAMERAS" in source
     assert "Command.STOP_CAMERAS" in source
 
 
 def test_readiness_only_narrows_primary_workflow_buttons() -> None:
-    source = _source("src/gello_cr/ui/main_window.py")
-
-    assert "and readiness.devices_ready" in source
-    assert "and readiness.camera_frames_ready" in source
+    source = _source("src/gello_cr/app/view_model.py")
+    assert "actions[Command.START_TELEOP] &= devices_ready" in source
+    assert "actions[Command.START_EPISODE] &= cameras_ready" in source
 
 
 def test_operator_app_does_not_start_devices_or_cameras() -> None:

@@ -1,4 +1,3 @@
-
 """Asynchronous command-request boundary for the PySide6 operator UI."""
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ class CommandRequest:
         cls,
         command: Command,
         payload: Mapping[str, Any] | None = None,
-    ) -> "CommandRequest":
+    ) -> CommandRequest:
         return cls(
             command=command,
             payload=MappingProxyType(dict(payload or {})),
@@ -54,11 +53,9 @@ class CommandQueueFull(CommandPortError):
 
 
 class CommandPort(Protocol):
-    def submit(self, request: CommandRequest) -> None:
-        ...
+    def submit(self, request: CommandRequest) -> None: ...
 
-    def close(self, timeout: float = 1.0) -> None:
-        ...
+    def close(self, timeout: float = 1.0) -> None: ...
 
 
 class CallbackCommandPort:
@@ -84,6 +81,7 @@ CommandErrorCallback = Callable[[CommandRequest, Exception], None]
 
 _SAFETY_COMMANDS = frozenset(
     {
+        Command.STOP_MOTION,
         Command.EMERGENCY_STOP,
         Command.REPORT_FAULT,
     }
@@ -111,12 +109,8 @@ class AsyncApplicationCommandPort:
             raise ValueError("safety_capacity must be positive")
 
         self._service = service
-        self._normal_queue: queue.Queue[CommandRequest] = queue.Queue(
-            maxsize=int(normal_capacity)
-        )
-        self._safety_queue: queue.Queue[CommandRequest] = queue.Queue(
-            maxsize=int(safety_capacity)
-        )
+        self._normal_queue: queue.Queue[CommandRequest] = queue.Queue(maxsize=int(normal_capacity))
+        self._safety_queue: queue.Queue[CommandRequest] = queue.Queue(maxsize=int(safety_capacity))
         self._home_queue: queue.Queue[CommandRequest] = queue.Queue(maxsize=1)
         self._error_callback = error_callback
         self._stop = threading.Event()
@@ -139,8 +133,10 @@ class AsyncApplicationCommandPort:
         self._normal_thread.start()
         self._safety_thread.start()
         self._home_thread = threading.Thread(
-            target=self._worker, args=(self._home_queue,),
-            name="ApplicationCommand-Home", daemon=True,
+            target=self._worker,
+            args=(self._home_queue,),
+            name="ApplicationCommand-Home",
+            daemon=True,
         )
         self._home_thread.start()
 
@@ -165,8 +161,9 @@ class AsyncApplicationCommandPort:
             if request.command in self._pending:
                 raise CommandAlreadyPending(f"{request.command.name} is already pending")
             target = (
-                self._home_queue if request.command is Command.RETURN_HOME else
-                self._safety_queue
+                self._home_queue
+                if request.command is Command.RETURN_HOME
+                else self._safety_queue
                 if request.command in _SAFETY_COMMANDS
                 else self._normal_queue
             )
@@ -174,14 +171,8 @@ class AsyncApplicationCommandPort:
                 target.put_nowait(request)
                 self._pending.add(request.command)
             except queue.Full as exc:
-                lane = (
-                    "safety"
-                    if request.command in _SAFETY_COMMANDS
-                    else "normal"
-                )
-                raise CommandQueueFull(
-                    f"{lane} command queue is full"
-                ) from exc
+                lane = "safety" if request.command in _SAFETY_COMMANDS else "normal"
+                raise CommandQueueFull(f"{lane} command queue is full") from exc
 
     def _worker(self, work_queue: queue.Queue[CommandRequest]) -> None:
         while not self._stop.is_set():
@@ -227,12 +218,17 @@ class AsyncApplicationCommandPort:
         for thread in (self._normal_thread, self._safety_thread, self._home_thread):
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
-        alive = [t.name for t in (self._normal_thread, self._safety_thread, self._home_thread) if t.is_alive()]
+        alive = [
+            t.name
+            for t in (self._normal_thread, self._safety_thread, self._home_thread)
+            if t.is_alive()
+        ]
         if alive:
             raise CommandPortError("命令线程尚未退出：" + ", ".join(alive))
 
     def _discard_pending(
-        self, work_queue: queue.Queue[CommandRequest],
+        self,
+        work_queue: queue.Queue[CommandRequest],
     ) -> None:
         while True:
             try:

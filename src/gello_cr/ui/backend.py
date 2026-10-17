@@ -1,4 +1,3 @@
-
 """Composition boundary between the application layer and runtime objects."""
 
 from __future__ import annotations
@@ -21,13 +20,11 @@ SnapshotSource = Callable[[], Mapping[str, Any]]
 
 
 class SnapshotRuntime(Protocol):
-    def snapshot(self) -> Mapping[str, Any]:
-        ...
+    def snapshot(self) -> Mapping[str, Any]: ...
 
 
 class SnapshotRecorder(Protocol):
-    def snapshot(self) -> Mapping[str, Any]:
-        ...
+    def snapshot(self) -> Mapping[str, Any]: ...
 
 
 class RuntimeFaultSnapshotBridge:
@@ -43,18 +40,11 @@ class RuntimeFaultSnapshotBridge:
 
     def snapshot(self) -> Mapping[str, Any]:
         snapshot = dict(self._runtime.snapshot())
-        runtime_state = str(
-            snapshot.get("state", "")
-        ).strip().lower()
+        runtime_state = str(snapshot.get("state", "")).strip().lower()
 
-        if (
-            runtime_state == "fault"
-            and self._service.state is not WorkflowState.ESTOP
-        ):
+        if runtime_state == "fault" and self._service.state is not WorkflowState.ESTOP:
             reason = str(
-                snapshot.get("last_error")
-                or snapshot.get("error")
-                or "runtime fault"
+                snapshot.get("last_error") or snapshot.get("error") or "runtime fault"
             ).strip()
             self._service.report_external_fault(
                 reason,
@@ -90,7 +80,7 @@ class OperatorBackend:
         event_capacity: int = 256,
         normal_command_capacity: int = 32,
         safety_command_capacity: int = 8,
-    ) -> "OperatorBackend":
+    ) -> OperatorBackend:
         if not hasattr(teleop_engine, "snapshot"):
             raise TypeError("teleop_engine must provide snapshot()")
         if not hasattr(recorder, "snapshot"):
@@ -115,6 +105,7 @@ class OperatorBackend:
             service,
             runtime_snapshot=runtime_fault_bridge.snapshot,
             recorder_snapshot=recorder.snapshot,
+            catalog_snapshot=bindings.datasets.snapshot,
             readiness_snapshot=readiness_snapshot,
             preview_snapshot=preview_snapshot,
             event_capacity=event_capacity,
@@ -137,4 +128,5 @@ class OperatorBackend:
 
     def close(self, timeout: float = 1.0) -> None:
         self.command_port.close(timeout=timeout)
+        self.bindings.close(timeout)
         self.presenter.close()

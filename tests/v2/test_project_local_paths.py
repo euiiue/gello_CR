@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from teleop_runtime import TeleopConfigStore
+from gello_cr.app.config_store import TeleopConfigStore
 
 
 def test_relative_gello_urdf_is_resolved_from_config_directory(tmp_path, monkeypatch):

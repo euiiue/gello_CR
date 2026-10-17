@@ -2,7 +2,7 @@
 
 The O6 SDK is blocking and must have exactly one owner thread.  This adapter
 contains that ownership boundary and exposes thread-safe snapshots/commands to
-the rest of the V2 application.
+the rest of the application.
 
 The implementation intentionally preserves the proven legacy behavior:
 - position polling every 0.2 s by default;
@@ -238,20 +238,23 @@ class O6Device:
         stop_event: threading.Event | None = None,
     ) -> bool:
         converted = _six_uint8(target, "O6 目标")
-        deadline = time.monotonic() + float(timeout)
+        started = time.monotonic()
+        deadline = started + float(timeout)
         while time.monotonic() < deadline:
-            if stop_event is not None and stop_event.is_set():
+            if self.error or (stop_event is not None and stop_event.is_set()):
                 return False
-            latest = self.latest()
+            with self._lock:
+                latest = self._latest
+                position_at = self._position_timestamp
             if latest is not None:
                 if any(latest.faults):
                     return False
-                if max(
-                    abs(a - b) for a, b in zip(latest.positions, converted)
+                # Completion requires a position read during this wait. A
+                # cached matching target must not hide a blocked/dead I/O worker.
+                if position_at >= started and max(
+                    abs(a - b) for a, b in zip(latest.positions, converted, strict=True)
                 ) <= int(tolerance):
-                    return True
-            if self.error:
-                return False
+                    return not self.error and not (stop_event is not None and stop_event.is_set())
             time.sleep(0.05)
         return False
 
@@ -291,9 +294,7 @@ class O6Device:
                 raise RuntimeError(f"O6 {number} 号电机恢复已被软件紧急停止")
             if time.monotonic() >= deadline:
                 request.cancelled.set()
-                raise TimeoutError(
-                    f"O6 {number} 号电机恢复命令超时（阶段={self.phase}）"
-                )
+                raise TimeoutError(f"O6 {number} 号电机恢复命令超时（阶段={self.phase}）")
 
         if request.error:
             raise RuntimeError(request.error)
@@ -329,8 +330,7 @@ class O6Device:
             from core.rs485.linker_hand_o6_rs485 import LinkerHandO6RS485
         except Exception as exc:
             raise RuntimeError(
-                "无法导入 LinkerHandO6RS485；请安装 LinkerHand SDK "
-                "或配置 o6.sdk_root"
+                "无法导入 LinkerHandO6RS485；请安装 LinkerHand SDK 或配置 o6.sdk_root"
             ) from exc
 
         return LinkerHandO6RS485
@@ -391,8 +391,7 @@ class O6Device:
             if fault_code not in (0, 1):
                 fault_name = O6_FAULT_NAMES.get(fault_code, "未知故障")
                 raise RuntimeError(
-                    f"O6 {number} 号电机为 {fault_name}（故障码 {fault_code}），"
-                    "禁止软件重新上力"
+                    f"O6 {number} 号电机为 {fault_name}（故障码 {fault_code}），禁止软件重新上力"
                 )
 
             position_setters = (
@@ -458,9 +457,7 @@ class O6Device:
                 "fault_after": after_fault,
             }
         except Exception as exc:
-            request.error = (
-                f"O6 {number} 号电机恢复失败: {type(exc).__name__}: {exc}"
-            )
+            request.error = f"O6 {number} 号电机恢复失败: {type(exc).__name__}: {exc}"
         finally:
             with self._lock:
                 if self._phase != "异常":
@@ -549,8 +546,111 @@ class O6Device:
             if hand is not None:
                 try:
                     hand.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._set_error(f"O6 关闭失败: {exc}")
             with self._lock:
                 if self._phase != "异常":
                     self._phase = "已关闭"
+
+
+class O6Controller:
+    """Expose O6 feedback and commands to motion orchestration."""
+
+    def __init__(
+        self,
+        port: str,
+        sdk_root: Path | str,
+        hand_id: int = 0x27,
+        baudrate: int = 115200,
+    ):
+        self.port = str(port)
+        self.sdk_root = str(sdk_root)
+        self.hand_id = int(hand_id)
+        self.baudrate = int(baudrate)
+
+        self._device = O6Device(
+            O6Config(
+                port=self.port,
+                sdk_root=self.sdk_root,
+                hand_id=self.hand_id,
+                baudrate=self.baudrate,
+            )
+        )
+
+    @property
+    def connected(self) -> bool:
+        return self._device.connected
+
+    @property
+    def error(self) -> str:
+        return self._device.error
+
+    @property
+    def phase(self) -> str:
+        return self._device.phase
+
+    def latest(
+        self,
+    ) -> tuple[
+        tuple[int, ...] | None,
+        tuple[int, ...] | None,
+        float,
+    ]:
+        snapshot = self._device.latest()
+        if snapshot is None:
+            return None, None, self._device.latest_position_timestamp
+        return (
+            tuple(int(value) for value in snapshot.positions),
+            tuple(int(value) for value in snapshot.faults),
+            float(self._device.latest_position_timestamp),
+        )
+
+    @property
+    def last_sent_target(self) -> tuple[int, ...] | None:
+        return self._device.last_sent_target
+
+    def connect(self, timeout: float = 10.0) -> tuple[int, ...]:
+        snapshot = self._device.connect(timeout=float(timeout))
+        return tuple(int(value) for value in snapshot.positions)
+
+    def set_profile(self, speed: Sequence[Any], torque: Sequence[Any]) -> None:
+        self._device.set_profile(speed, torque)
+
+    def set_target(self, target: Sequence[Any]) -> None:
+        self._device.set_target(target)
+
+    def hold_current(self) -> None:
+        self._device.hold_current()
+
+    def recover_motor(
+        self,
+        motor_number: int,
+        speed: Any,
+        torque: Any,
+        timeout: float = 4.0,
+        stop_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        return self._device.recover_motor(
+            motor_number,
+            speed,
+            torque,
+            timeout=float(timeout),
+            stop_event=stop_event,
+        )
+
+    def wait_until_position(
+        self,
+        target: Sequence[Any],
+        tolerance: int = 6,
+        timeout: float = 15.0,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        return self._device.wait_until_position(
+            target,
+            tolerance=int(tolerance),
+            timeout=float(timeout),
+            stop_event=stop_event,
+        )
+
+    def close(self) -> None:
+        self._device.close()

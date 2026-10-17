@@ -18,7 +18,10 @@ class HardwareImportBlocker(importlib.abc.MetaPathFinder):
 
 
 @pytest.fixture(autouse=True)
-def no_hardware(monkeypatch):
+def no_hardware(monkeypatch, request):
+    if request.node.get_closest_marker("hardware"):
+        yield
+        return
     def forbidden(*args, **kwargs):
         raise AssertionError('Hardware/network access prohibited in offline tests')
     monkeypatch.setattr(socket.socket, 'connect', forbidden)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -217,5 +216,29 @@ def test_o6_recovery_rejects_unsafe_fault_code(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="禁止软件重新上力"):
             device.recover_motor(3, speed=20, torque=30, timeout=1.0)
         assert hand.single_torque_calls == []
+    finally:
+        device.close()
+
+
+@pytest.mark.parametrize("error", ["", "O6 communication failed"])
+def test_o6_wait_does_not_accept_cached_goal_without_a_new_position_read(tmp_path, error):
+    device = O6Device(_config(tmp_path / "fake"))
+    target = (10, 20, 30, 40, 50, 60)
+    device._set_snapshot(positions=target, faults=(0,) * 6, position_read=True)
+    device._error = error
+
+    assert not device.wait_until_position(target, timeout=0.01)
+
+
+def test_o6_wait_accepts_new_physical_position_feedback(tmp_path):
+    port = tmp_path / "ttyUSB0"
+    port.touch()
+    hand = FakeHand(hand_id=0x27, modbus_port=str(port), baudrate=115200)
+    device = O6Device(_config(port), hand_factory=lambda **kwargs: hand)
+    try:
+        device.connect(timeout=0.5)
+        target = (70,) * 6
+        device.set_target(target)
+        assert device.wait_until_position(target, timeout=0.5)
     finally:
         device.close()

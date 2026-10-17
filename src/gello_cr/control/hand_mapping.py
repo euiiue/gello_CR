@@ -55,7 +55,7 @@ def interpolate_o6_target(
 
     return tuple(
         int(round(float(a) + fraction * (float(b) - float(a))))
-        for a, b in zip(opened, closed)
+        for a, b in zip(opened, closed, strict=True)
     )
 
 
@@ -72,4 +72,4 @@ def should_send_o6_target(
         return True
 
     previous = _six_uint8(previous_target, "previous_target")
-    return max(abs(a - b) for a, b in zip(current, previous)) >= deadband
+    return max(abs(a - b) for a, b in zip(current, previous, strict=True)) >= deadband

@@ -5,12 +5,12 @@ import time
 
 import pytest
 
-from gello_cr.bootstrap.sample_source import RecordingSampleSource
+from gello_cr.recording.source import CR3O6CaptureSource
 
 
 class Engine:
     def dataset_sample(self):
-        return {'quality': {'existing': 1}}
+        return {'timestamp': time.monotonic(), 'observation_state': [0.]*18, 'action': [0.]*12, 'quality': {'existing': 1}}
 
 
 def _cfg():
@@ -21,18 +21,18 @@ def _cfg():
 
 
 def test_sample_source_requires_both_camera_streams() -> None:
-    source = RecordingSampleSource(Engine(), _cfg())
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
 
     with pytest.raises(RuntimeError, match='腕部'):
-        source()
+        source.capture()
 
     source.update_wrist(object(), time.monotonic())
     with pytest.raises(RuntimeError, match='基座'):
-        source()
+        source.capture()
 
 
 def test_sample_source_combines_three_rgb_images_and_quality() -> None:
-    source = RecordingSampleSource(Engine(), _cfg())
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
     now = time.monotonic()
     wrist = object()
     base = object()
@@ -40,17 +40,17 @@ def test_sample_source_combines_three_rgb_images_and_quality() -> None:
 
     source.update_wrist(wrist, now)
     source.update_base(base, roi, now)
-    sample = source()
+    sample = source.capture()
 
-    assert sample['image_wrist_rgb'] is wrist
-    assert sample['image_base_rgb'] is base
-    assert sample['image_roi_rgb'] is roi
-    assert sample['quality']['existing'] == 1
-    assert sample['quality']['camera_skew_exceeded'] == 0.0
+    assert sample.images['left_wrist_0_rgb'] is wrist
+    assert sample.images['base_0_rgb'] is base
+    assert sample.images['right_wrist_0_rgb'] is roi
+    assert sample.metadata['quality']['existing'] == 1
+    assert sample.metadata['quality']['camera_skew_exceeded'] == 0.0
 
 
 def test_snapshot_ready_respects_age_and_skew() -> None:
-    source = RecordingSampleSource(Engine(), _cfg())
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
     now = time.monotonic()
     source.update_wrist(object(), now)
     source.update_base(object(), object(), now)
@@ -61,7 +61,7 @@ def test_snapshot_ready_respects_age_and_skew() -> None:
 
 
 def test_clear_camera_state_makes_source_not_ready() -> None:
-    source = RecordingSampleSource(Engine(), _cfg())
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
     now = time.monotonic()
     source.update_wrist(object(), now)
     source.update_base(object(), object(), now)
@@ -77,8 +77,8 @@ def test_clear_camera_state_makes_source_not_ready() -> None:
     (99.7, 100.0, '不同步'),
 ])
 def test_readiness_explains_stale_camera_and_recovers(monkeypatch, wrist_time, base_time, reason):
-    monkeypatch.setattr('gello_cr.bootstrap.sample_source.time.monotonic', lambda: 100.0)
-    source = RecordingSampleSource(Engine(), _cfg())
+    monkeypatch.setattr('gello_cr.recording.source.time.monotonic', lambda: 100.0)
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
     source.update_wrist(object(), wrist_time)
     source.update_base(object(), object(), base_time)
 
@@ -92,15 +92,15 @@ def test_readiness_explains_stale_camera_and_recovers(monkeypatch, wrist_time, b
 
 
 def test_third_camera_has_independent_freshness_skew_and_preview_timestamp(monkeypatch):
-    monkeypatch.setattr('gello_cr.bootstrap.sample_source.time.monotonic', lambda: 100.0)
-    source = RecordingSampleSource(Engine(), _cfg())
+    monkeypatch.setattr('gello_cr.recording.source.time.monotonic', lambda: 100.0)
+    source = CR3O6CaptureSource(Engine().dataset_sample, _cfg())
     source.update_base(object(), object(), 100.0)
     source.update_wrist(object(), 100.0)
     source.update_stream(2, object(), 98.0)
     assert '第三路' in source.readiness_error()
-    sample = source()
-    assert sample['quality']['roi_age_exceeded'] == 1
-    assert sample['quality']['camera_skew_s'] == 2
+    sample = source.capture()
+    assert sample.metadata['quality']['roi_age_exceeded'] == 1
+    assert sample.metadata['quality']['camera_skew_s'] == 2
     source.update_stream(2, object(), 99.8)
     assert '不同步' in source.readiness_error()
     source.update_stream(2, object(), 100.0)
