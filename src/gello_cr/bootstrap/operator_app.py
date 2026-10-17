@@ -128,6 +128,7 @@ def build_operator_application(
     readiness = OperatorReadinessProvider(
         runtime=runtime,
         cameras=cameras,
+        robot_status_snapshot=runtime.cr3a_lifecycle.status_snapshot,
     )
 
     preview_snapshot = getattr(

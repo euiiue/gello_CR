@@ -3,8 +3,53 @@
 import time
 from types import SimpleNamespace
 
+from gello_cr.app import ApplicationService, build_application_view_model
+from gello_cr.app.config_store import TeleopConfigStore
+from gello_cr.bootstrap.operator_app import build_operator_application
 from gello_cr.bootstrap.preparation import OperatorReadinessProvider
+from gello_cr.core.state_machine import Command, WorkflowState, WorkflowStateMachine
 from gello_cr.ui.readiness import OperatorReadiness
+
+
+def test_production_readiness_uses_cached_robot_feedback_for_permissions(tmp_path):
+    store = TeleopConfigStore(tmp_path / "config" / "workbench.json")
+    store.data["dataset"]["root"] = str(tmp_path / "datasets")
+    store.data["dataset"]["staging_root"] = str(tmp_path / "staging")
+    store.data["trajectory"]["root"] = str(tmp_path / "trajectories")
+    store.save()
+    operator = build_operator_application(tmp_path)
+    try:
+        service = ApplicationService(
+            state_machine=WorkflowStateMachine(WorkflowState.ROBOT_ENABLED)
+        )
+        service.set_permission_sources(readiness_snapshot=operator.readiness.snapshot)
+        lifecycle = operator.runtime.cr3a_lifecycle
+        for connected, servo, age, error, expected_servo, allowed in (
+            (True, "on", 0, "", "on", True),
+            (True, "on", 2, "", "unknown", False),
+            (True, "error", 0, "Servo 反馈读取失败", "error", False),
+            (False, "off", 0, "机器人连接已断开", "off", False),
+        ):
+            with lifecycle._status_lock:
+                lifecycle._status.update(
+                    connected=connected,
+                    servo_state=servo,
+                    sampled_at=time.monotonic() - age,
+                    error=error,
+                )
+            snapshot = operator.readiness.snapshot()
+            assert snapshot["robot_connected"] is connected
+            readiness = OperatorReadiness.from_mapping(snapshot)
+            assert readiness.servo_state == expected_servo
+            if age == 0:
+                assert readiness.robot_error == error
+            else:
+                assert "过期" in readiness.robot_error
+            view = build_application_view_model(service.snapshot(), {}, {}, snapshot)
+            assert view.actions[Command.RETURN_HOME] is allowed
+            assert service.can(Command.RETURN_HOME) is allowed
+    finally:
+        operator.close()
 
 
 def test_connected_master_with_stale_feedback_is_not_teleop_ready():
@@ -20,7 +65,7 @@ def test_connected_master_with_stale_feedback_is_not_teleop_ready():
         master_controller=master,
         o6_controller=hand,
         sample_source=SimpleNamespace(readiness_error=lambda: ""),
-        lifecycle=SimpleNamespace(
+        cr3a_lifecycle=SimpleNamespace(
             status_snapshot=lambda: {
                 "connected": True,
                 "servo_state": "on",
@@ -39,7 +84,11 @@ def test_connected_master_with_stale_feedback_is_not_teleop_ready():
         ),
     )
     cameras = SimpleNamespace(snapshot=lambda: SimpleNamespace(running=False, error=""))
-    snapshot = OperatorReadinessProvider(runtime=runtime, cameras=cameras).snapshot()
+    snapshot = OperatorReadinessProvider(
+        runtime=runtime,
+        cameras=cameras,
+        robot_status_snapshot=runtime.cr3a_lifecycle.status_snapshot,
+    ).snapshot()
     readiness = OperatorReadiness.from_mapping(snapshot)
 
     assert readiness.master_connected

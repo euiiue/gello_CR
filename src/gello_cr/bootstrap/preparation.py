@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -22,9 +22,11 @@ class OperatorReadinessProvider:
         *,
         runtime: Any,
         cameras: Any,
+        robot_status_snapshot: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self._runtime = runtime
         self._cameras = cameras
+        self._robot_status_snapshot = robot_status_snapshot
 
     def snapshot(self) -> Mapping[str, Any]:
         master = self._runtime.master_controller
@@ -91,9 +93,8 @@ class OperatorReadinessProvider:
                         if fault and any(fault)
                         else "末端反馈过期或尚未就绪"
                     )
-        lifecycle = getattr(self._runtime, "lifecycle", None)
-        if lifecycle is not None and hasattr(lifecycle, "status_snapshot"):
-            status = lifecycle.status_snapshot()
+        if self._robot_status_snapshot is not None:
+            status = self._robot_status_snapshot()
             sampled_at = status.get("sampled_at", 0)
             age = max(0.0, time.monotonic() - sampled_at) if sampled_at else None
             result.update(

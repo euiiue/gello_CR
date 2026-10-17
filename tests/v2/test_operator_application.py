@@ -73,6 +73,9 @@ class SampleSource:
 
 
 class Lifecycle:
+    def status_snapshot(self):
+        return {"connected": False, "servo_state": "unknown", "sampled_at": None, "error": ""}
+
     def callbacks(self):
         from gello_cr.app import RuntimeLifecycleCallbacks
         return RuntimeLifecycleCallbacks(
